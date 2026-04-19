@@ -1,0 +1,7 @@
+STEP: build
+Compiling project
+WARNING deprecation warning
+STEP: integration
+Running suites
+FAILED service health check
+Cleanup complete

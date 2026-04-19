@@ -1,0 +1,16 @@
+STEP: setup
+Preparing environment
+Dependencies installed
+STEP: test
+Running pytest -q
+tests/test_math.py::test_add FAILED
+Traceback (most recent call last):
+  File "tests/test_math.py", line 10, in test_add
+    assert add(1, 2) == 4
+AssertionError
+Cleaning workspace
+STEP: network
+Retrying request
+WARNING transient network issue
+Retrying request
+WARNING transient network issue
