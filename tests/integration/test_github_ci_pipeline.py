@@ -39,6 +39,7 @@ class FakeGitHubTransport(GitHubTransport):
             ("repos/acme/widgets/actions/runs/200/jobs", (("per_page", 100),)): {
                 "jobs": [
                     {"id": 501, "name": "test-snowflake", "status": "completed", "conclusion": "failure"},
+                    {"id": 502, "name": "audit-integration-test", "status": "completed", "conclusion": "skipped"},
                 ]
             },
             ("repos/acme/widgets/actions/runs/199/jobs", (("per_page", 100),)): {

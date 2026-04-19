@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Literal, Mapping, Optional
 from urllib.parse import urlencode
 
 import requests
@@ -139,6 +139,7 @@ class GitHubLogFetcher:
             "fetch_runs",
             repo=target.repo,
             runs=len(selected_runs),
+            transport=type(self._transport).__name__,
         )
 
         selected_group: Optional[str] = None
@@ -162,6 +163,16 @@ class GitHubLogFetcher:
                     continue
 
                 status = classify_job_status(job.conclusion)
+                if status is None:
+                    log_stage_event(
+                        self._logger,
+                        "skip_job_without_logs",
+                        run_id=run.run_id,
+                        job_id=job.job_id,
+                        job_name=job.job_name,
+                        conclusion=job.conclusion,
+                    )
+                    continue
                 if not include_passed and status == "passed":
                     continue
 
@@ -261,7 +272,11 @@ class GitHubLogFetcher:
         return sorted(jobs, key=lambda job: (job.job_name.lower(), job.job_id))
 
     def fetch_job_log(self, repo: str, job_id: int) -> str:
-        content = self._transport.get_text(f"repos/{repo}/actions/jobs/{job_id}/logs")
+        endpoint = f"repos/{repo}/actions/jobs/{job_id}/logs"
+        try:
+            content = self._transport.get_text(endpoint)
+        except (RuntimeError, requests.HTTPError) as exc:
+            raise RuntimeError(_format_log_fetch_error(repo, job_id, exc, self._transport)) from exc
         return normalize_log_content(content)
 
     def _resolve_runs(self, target: GitHubTarget, *, max_runs: int) -> list[WorkflowRun]:
@@ -278,8 +293,13 @@ def create_github_transport(token: Optional[str] = None) -> GitHubTransport:
     return RequestsTransport(token=token)
 
 
-def classify_job_status(conclusion: Optional[str]) -> str:
-    return "passed" if conclusion == "success" else "failed"
+def classify_job_status(conclusion: Optional[str]) -> Optional[Literal["passed", "failed"]]:
+    normalized = (conclusion or "").strip().lower()
+    if normalized == "success":
+        return "passed"
+    if normalized in {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}:
+        return "failed"
+    return None
 
 
 def normalize_job_name(job_name: str) -> str:
@@ -308,6 +328,26 @@ def normalize_log_content(content: str) -> str:
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     normalized = _ANSI_ESCAPE_PATTERN.sub("", normalized)
     return normalized.strip("\n")
+
+
+def _format_log_fetch_error(
+    repo: str,
+    job_id: int,
+    error: Exception,
+    transport: GitHubTransport,
+) -> str:
+    message = str(error).strip() or error.__class__.__name__
+    if "404" in message:
+        return (
+            f"GitHub returned 404 while fetching logs for job {job_id} in {repo} "
+            f"via {type(transport).__name__}. This usually means the job did not emit logs "
+            f"(for example, it was skipped) or the current GitHub credentials do not have "
+            f"access to this repository or workflow run. Original error: {message}"
+        )
+    return (
+        f"Failed to fetch logs for job {job_id} in {repo} via {type(transport).__name__}: "
+        f"{message}"
+    )
 
 
 def _parse_workflow_run(payload: Mapping[str, Any]) -> WorkflowRun:
