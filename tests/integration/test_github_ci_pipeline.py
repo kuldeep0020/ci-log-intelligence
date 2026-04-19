@@ -45,6 +45,7 @@ class FakeGitHubTransport(GitHubTransport):
             ("repos/acme/widgets/actions/runs/199/jobs", (("per_page", 100),)): {
                 "jobs": [
                     {"id": 401, "name": "test-redshift", "status": "completed", "conclusion": "success"},
+                    {"id": 402, "name": "lint", "status": "completed", "conclusion": "success"},
                 ]
             },
         }
@@ -63,18 +64,21 @@ tests/test_query.py::test_query PASSED
 query result stable
 """,
         }
+        self.requested_text_endpoints: list[str] = []
 
     def get_json(self, endpoint: str, params=None):
         normalized_params = tuple(sorted((params or {}).items()))
         return self._json_payloads[(endpoint, normalized_params)]
 
     def get_text(self, endpoint: str, params=None) -> str:
+        self.requested_text_endpoints.append(endpoint)
         return self._text_payloads[endpoint]
 
 
 class GitHubCIPipelineIntegrationTests(unittest.TestCase):
     def test_full_ci_analysis_pipeline_with_mocked_github(self) -> None:
-        fetcher = GitHubLogFetcher(transport=FakeGitHubTransport())
+        transport = FakeGitHubTransport()
+        fetcher = GitHubLogFetcher(transport=transport)
 
         report = analyze_ci_url(
             "https://github.com/acme/widgets/pull/42",
@@ -91,6 +95,7 @@ class GitHubCIPipelineIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["metadata"]["passed_runs"], 1)
         self.assertEqual(len(payload["failed_blocks"]), 1)
         self.assertEqual(payload["passed_context"][0]["job_name"], "test-redshift")
+        self.assertNotIn("repos/acme/widgets/actions/jobs/402/logs", transport.requested_text_endpoints)
         self.assertIn(
             "Failure occurs only in variant snowflake for job group test.",
             payload["cross_run_insights"],

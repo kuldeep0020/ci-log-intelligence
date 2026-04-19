@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from typing import Any, Iterable, Literal, Mapping, Optional
 from urllib.parse import urlencode
@@ -154,12 +155,13 @@ class GitHubLogFetcher:
 
         logs: list[NormalizedLog] = []
         jobs_processed = 0
-
+        all_jobs: list[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]] = []
         for run in selected_runs:
             jobs = self.fetch_jobs_for_run(target.repo, run.run_id)
             for job in jobs:
                 jobs_processed += 1
-                if selected_group is not None and normalize_job_name(job.job_name) != selected_group:
+                logical_name = normalize_job_name(job.job_name)
+                if selected_group is not None and logical_name != selected_group:
                     continue
 
                 status = classify_job_status(job.conclusion)
@@ -173,24 +175,22 @@ class GitHubLogFetcher:
                         conclusion=job.conclusion,
                     )
                     continue
-                if not include_passed and status == "passed":
-                    continue
+                all_jobs.append((run, job, logical_name, status))
 
-                logs.append(
-                    NormalizedLog(
-                        run_id=run.run_id,
-                        job_id=job.job_id,
-                        job_name=job.job_name,
-                        status=status,
-                        content=self.fetch_job_log(target.repo, job.job_id),
-                    )
-                )
+        fetch_plan = _plan_log_fetches(
+            all_jobs,
+            include_passed=include_passed,
+            max_passed_runs=max_passed_runs,
+        )
+        logs = self._fetch_planned_logs(target.repo, fetch_plan)
 
         log_stage_event(
             self._logger,
             "fetch_jobs",
             jobs_processed=jobs_processed,
             logs=len(logs),
+            planned_failed_jobs=len([item for item in fetch_plan if item[3] == "failed"]),
+            planned_passed_jobs=len([item for item in fetch_plan if item[3] == "passed"]),
         )
 
         if not include_passed:
@@ -279,6 +279,39 @@ class GitHubLogFetcher:
             raise RuntimeError(_format_log_fetch_error(repo, job_id, exc, self._transport)) from exc
         return normalize_log_content(content)
 
+    def _fetch_planned_logs(
+        self,
+        repo: str,
+        planned_jobs: list[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]],
+    ) -> list[NormalizedLog]:
+        if not planned_jobs:
+            return []
+
+        if self._supports_parallel_log_fetch():
+            max_workers = min(4, len(planned_jobs))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                logs = list(executor.map(lambda item: self._fetch_single_log(repo, item), planned_jobs))
+            return _sort_logs(logs)
+
+        return _sort_logs([self._fetch_single_log(repo, item) for item in planned_jobs])
+
+    def _fetch_single_log(
+        self,
+        repo: str,
+        planned_job: tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]],
+    ) -> NormalizedLog:
+        run, job, _, status = planned_job
+        return NormalizedLog(
+            run_id=run.run_id,
+            job_id=job.job_id,
+            job_name=job.job_name,
+            status=status,
+            content=self.fetch_job_log(repo, job.job_id),
+        )
+
+    def _supports_parallel_log_fetch(self) -> bool:
+        return isinstance(self._transport, GhCLITransport)
+
     def _resolve_runs(self, target: GitHubTarget, *, max_runs: int) -> list[WorkflowRun]:
         if target.pr_number is not None:
             return self.fetch_workflow_runs_for_pr(target.repo, target.pr_number, max_runs)
@@ -328,6 +361,40 @@ def normalize_log_content(content: str) -> str:
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     normalized = _ANSI_ESCAPE_PATTERN.sub("", normalized)
     return normalized.strip("\n")
+
+
+def _plan_log_fetches(
+    jobs: Iterable[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]],
+    *,
+    include_passed: bool,
+    max_passed_runs: int,
+) -> list[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]]:
+    job_list = sorted(
+        jobs,
+        key=lambda item: (item[2], -item[0].run_id, item[1].job_name.lower(), item[1].job_id),
+    )
+    failed_groups = {logical_name for _, _, logical_name, status in job_list if status == "failed"}
+
+    planned: list[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]] = [
+        item for item in job_list if item[3] == "failed"
+    ]
+    if not include_passed or not failed_groups or max_passed_runs <= 0:
+        return planned
+
+    passed_per_group: dict[str, int] = defaultdict(int)
+    for item in job_list:
+        _, _, logical_name, status = item
+        if status != "passed" or logical_name not in failed_groups:
+            continue
+        if passed_per_group[logical_name] >= max_passed_runs:
+            continue
+        planned.append(item)
+        passed_per_group[logical_name] += 1
+
+    return sorted(
+        planned,
+        key=lambda item: (item[2], -item[0].run_id, item[1].job_name.lower(), item[1].job_id),
+    )
 
 
 def _format_log_fetch_error(

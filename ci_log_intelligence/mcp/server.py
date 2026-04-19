@@ -11,7 +11,12 @@ server = FastMCP("ci-log-intelligence")
 
 @server.tool(name="analyze_ci_failure")
 def analyze_ci_failure(ci_url: str) -> dict[str, object]:
-    report = analyze_ci_url(ci_url, include_passed=True)
+    report = analyze_ci_url(
+        ci_url,
+        include_passed=True,
+        max_passed_runs=1,
+        max_runs=3,
+    )
     return report.to_dict()
 
 
