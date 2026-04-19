@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "ci-log-intelligence": {
+      "type": "stdio",
+      "command": "ci-log-intelligence-mcp",
+      "args": []
+    }
+  }
+}

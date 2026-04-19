@@ -1,0 +1,4 @@
+[mcp_servers.ci-log-intelligence]
+command = "ci-log-intelligence-mcp"
+args = []
+type = "stdio"

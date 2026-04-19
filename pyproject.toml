@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ci-log-intelligence"
+version = "0.1.0"
+description = "CI-aware log intelligence with reducer, CLI, and MCP server."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.136.0",
+  "fastmcp>=2.14.7",
+  "pydantic>=2.12.0",
+  "requests>=2.33.0",
+  "uvicorn>=0.44.0",
+]
+
+[project.scripts]
+ci-log-intel = "ci_log_intelligence.cli.main:main"
+ci-log-intelligence-mcp = "ci_log_intelligence.mcp.server:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["ci_log_intelligence*"]
