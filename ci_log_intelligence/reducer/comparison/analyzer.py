@@ -175,11 +175,21 @@ def _has_traceback(scored_block: ScoredBlock) -> bool:
 
 
 def _stack_depth(scored_block: ScoredBlock) -> int:
-    count = 0
-    for line in scored_block.block.lines:
-        if line.content.startswith("  File ") or line.content.startswith("    "):
-            count += 1
-    return count
+    """Approximate Python traceback depth by counting ``  File `` frame lines.
+
+    Python tracebacks emit one ``  File "<path>", line N, in <fn>`` line per
+    frame. A previous heuristic also counted any 4-space-indented line, which
+    over-matched on indented YAML, JSON, pytest -v output, and prose, and
+    inflated ranking signals for blocks that contained no real frames. We
+    therefore restrict the count to the canonical frame prefix. This may
+    undercount the per-frame continuation line, but is 1:1 with frame *count*
+    -- the ranking signal we actually want.
+    """
+    return sum(
+        1
+        for line in scored_block.block.lines
+        if line.content.startswith("  File ")
+    )
 
 
 def _build_failed_criteria(failed_analyses: Iterable[FailedLogAnalysis]) -> dict[str, dict[str, set[str]]]:

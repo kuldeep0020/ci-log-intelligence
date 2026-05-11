@@ -148,6 +148,52 @@ class SelectRootCauseTiebreakTests(unittest.TestCase):
         analysis, _ = choice
         self.assertEqual(analysis.log.job_name, "job-b")
 
+    def test_four_space_indented_yaml_does_not_inflate_stack_depth(self) -> None:
+        # Two analyses with the SAME number of ``  File `` frames (one each).
+        # The first analysis follows its frame with 20 lines of 4-space-indented
+        # YAML / JSON output. Under the old loose heuristic, this would
+        # over-count and cause the YAML-bearing block to win the stack-depth
+        # tiebreak. With the tightened heuristic, both blocks tie on stack
+        # depth and the next tiebreak (start_line) selects ``job-a``.
+        yaml_indented_lines = [
+            ParsedLine(2 + idx, f"    key{idx}: value{idx}", None, "test", [])
+            for idx in range(20)
+        ]
+        bloated_with_yaml = _make_analysis(
+            run_id=10,
+            job_name="job-b",
+            block_lines=[
+                ParsedLine(1, "Traceback (most recent call last):", None, "test", ["traceback"]),
+                ParsedLine(2, "  File 'a.py', line 1", None, "test", []),
+                *[
+                    ParsedLine(3 + idx, f"    key{idx}: value{idx}", None, "test", [])
+                    for idx in range(20)
+                ],
+            ],
+            anchors=[Anchor(1, "traceback", 3)],
+        )
+        single_frame = _make_analysis(
+            run_id=10,
+            job_name="job-a",
+            block_lines=[
+                ParsedLine(1, "Traceback (most recent call last):", None, "test", ["traceback"]),
+                ParsedLine(2, "  File 'a.py', line 1", None, "test", []),
+            ],
+            anchors=[Anchor(1, "traceback", 3)],
+        )
+
+        # Suppress unused-name lint; the yaml-only lines exist as a regression
+        # vehicle inside ``bloated_with_yaml``.
+        del yaml_indented_lines
+
+        choice = select_root_cause([bloated_with_yaml, single_frame])
+
+        analysis, _ = choice
+        # Both blocks have a single ``  File `` frame, so they tie on stack
+        # depth and tie on start_line (1). The next tiebreak is job_name
+        # alphabetical ascending -- ``job-a`` wins.
+        self.assertEqual(analysis.log.job_name, "job-a")
+
     def test_earliest_position_wins_at_tied_traceback_depth(self) -> None:
         early = _make_analysis(
             run_id=10,

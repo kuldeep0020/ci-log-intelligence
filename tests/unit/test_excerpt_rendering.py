@@ -119,6 +119,35 @@ class RenderBlockExcerptTests(unittest.TestCase):
         content_lines = [line for line in excerpt.split("\n") if line != "..."]
         self.assertEqual(len(content_lines), 10)
 
+    def test_anchor_line_is_preserved_when_max_lines_truncates_window(self) -> None:
+        # Anchor at line 10, context_around_anchor=5 means window [5..15].
+        # With max_lines=3, the naive left-to-right emit would output lines 5, 6, 7
+        # and silently drop the anchor at line 10. The excerpt is *about* the
+        # anchor, so the anchor line must always be present.
+        contents = [f"content {n}" for n in range(1, 21)]
+        block = _block(1, 20, contents, [Anchor(10, "error", 3)])
+
+        excerpt = render_block_excerpt(block, max_lines=3, context_around_anchor=5)
+
+        self.assertIn("content 10", excerpt)
+
+    def test_anchor_line_is_preserved_for_each_window_under_tight_cap(self) -> None:
+        # Two anchors far apart: each window must include its anchor even
+        # when ``max_lines`` is tight enough to permit only the anchor lines
+        # themselves (plus separator).
+        contents = [f"content {n}" for n in range(1, 101)]
+        block = _block(
+            1,
+            100,
+            contents,
+            [Anchor(10, "error", 3), Anchor(80, "error", 3)],
+        )
+
+        excerpt = render_block_excerpt(block, max_lines=4, context_around_anchor=5)
+
+        self.assertIn("content 10", excerpt)
+        self.assertIn("content 80", excerpt)
+
 
 class AnchorCentricExcerptSmokeTest(unittest.TestCase):
     def test_analyze_log_excerpt_renders_around_anchor_past_head(self) -> None:

@@ -134,16 +134,18 @@ def _build_report(
         analysis, scored_block = root_cause_candidate
         root_cause = _summarize_root_cause(scored_block, analysis.log.job_name, analysis.log.run_id)
         failed_block_views = []
-        for analysis in sorted(
+        for current_analysis in sorted(
             failed_analyses,
             key=lambda item: (-item.log.run_id, item.log.job_name.lower(), item.log.job_id),
         ):
-            for block in analysis.result.blocks:
+            for block in current_analysis.result.blocks:
                 failed_block_views.append(
                     FailedBlockView(
                         start_line=block.block.start_line,
                         end_line=block.block.end_line,
-                        summary=summarize_failed_block(block, analysis.log.job_name, analysis.log.run_id),
+                        summary=summarize_failed_block(
+                            block, current_analysis.log.job_name, current_analysis.log.run_id
+                        ),
                     )
                 )
 

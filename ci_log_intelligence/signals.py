@@ -39,7 +39,7 @@ _FILTERABLE_BENIGN_SIGNALS: Final[frozenset[str]] = frozenset({"error", "failed"
 BENIGN_PATTERNS: Final[list["re.Pattern[str]"]] = [
     re.compile(r"\b(0|no)\s+errors?\b", re.IGNORECASE),
     re.compile(r"\b(0|no)\s+(failures?|failed)\b", re.IGNORECASE),
-    re.compile(r"\b(errors?|failures?)\s*[:=]\s*0\b", re.IGNORECASE),
+    re.compile(r"\b(errors?|failures?|failed)\s*[:=]\s*(0|none|false)\b", re.IGNORECASE),
     re.compile(r"\bno\s+failures\b", re.IGNORECASE),
 ]
 

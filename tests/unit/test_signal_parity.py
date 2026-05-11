@@ -46,6 +46,10 @@ class SignalAnchorParityTests(unittest.TestCase):
             "errors: 0",
             "0 failures",
             "no failures",
+            "errors: none",
+            "failed: false",
+            "failures = none",
+            "errors=false",
         ]
         for content in cases:
             with self.subTest(content=content):
