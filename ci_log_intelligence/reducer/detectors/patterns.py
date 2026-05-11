@@ -36,9 +36,16 @@ to compute the set of FAIL lines GoTestFailDetector must skip. Both consumers
 read the same constant so the coordination contract is single-sourced.
 """
 
+# Rust's ``--> file:line:col`` line that follows ``error[E####]:`` or ``error:``.
+# rustc indents the arrow by 3 spaces; we tolerate any leading whitespace.
+RUST_ARROW_PATTERN: Final["re.Pattern[str]"] = re.compile(
+    r"^\s*-->\s+(?P<file>\S+):(?P<line>\d+):(?P<col>\d+)\s*$"
+)
+
 
 __all__ = [
     "GO_TEST_FAIL_PATTERN",
     "HASH_MISMATCH_PAIRING_WINDOW",
     "HASH_MISMATCH_PATTERN",
+    "RUST_ARROW_PATTERN",
 ]

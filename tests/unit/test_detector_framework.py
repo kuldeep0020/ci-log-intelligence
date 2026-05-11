@@ -193,6 +193,11 @@ class DetectorFrameworkRegistryTests(unittest.TestCase):
                 "pytest_fail",
                 "rust_test_fail",
                 "junit_xml",
+                "build_error_rust",
+                "build_error_go",
+                "build_error_npm",
+                "build_error_make",
+                "build_error_gcc",
                 "generic",
             ],
         )
@@ -201,7 +206,7 @@ class DetectorFrameworkRegistryTests(unittest.TestCase):
         self.assertIsInstance(detectors[2], PytestFailDetector)
         self.assertIsInstance(detectors[3], RustTestFailDetector)
         self.assertIsInstance(detectors[4], JUnitXmlDetector)
-        self.assertIsInstance(detectors[5], GenericDetector)
+        self.assertIsInstance(detectors[-1], GenericDetector)
         self.assertEqual(detectors[-1].failure_type, "generic")
 
     def test_run_detectors_accepts_explicit_detector_sequence(self) -> None:
