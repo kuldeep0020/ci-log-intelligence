@@ -5,12 +5,23 @@ from typing import Sequence
 from ...models import Anchor, ParsedLine
 from .base import DetectedFailure, Detector, JobContext
 from .generic import GenericDetector
+from .go_test_fail import GoTestFailDetector
 from .hash_mismatch import HashMismatchDetector
+from .junit_xml import JUnitXmlDetector
+from .pytest_fail import PytestFailDetector
+from .rust_test_fail import RustTestFailDetector
 
 # Ordered specialized-first: ties in ``_resolve_failure_type`` already break by
 # severity then earliest anchor line, but keeping specialized detectors ahead
 # of ``GenericDetector`` makes the registry's intent explicit.
-_REGISTRY: list[Detector] = [HashMismatchDetector(), GenericDetector()]
+_REGISTRY: list[Detector] = [
+    HashMismatchDetector(),
+    GoTestFailDetector(),
+    PytestFailDetector(),
+    RustTestFailDetector(),
+    JUnitXmlDetector(),
+    GenericDetector(),
+]
 
 
 def get_detectors() -> list[Detector]:
@@ -55,8 +66,12 @@ __all__ = [
     "DetectedFailure",
     "Detector",
     "GenericDetector",
+    "GoTestFailDetector",
     "HashMismatchDetector",
+    "JUnitXmlDetector",
     "JobContext",
+    "PytestFailDetector",
+    "RustTestFailDetector",
     "detected_failures_to_anchors",
     "get_detectors",
     "run_detectors",

@@ -33,16 +33,16 @@ See ``docs/use-case-go-test-hash-mismatch.md`` for the full motivation.
 
 from __future__ import annotations
 
-import re
 from typing import Any, Optional, Sequence
 
 from ...models import ParsedLine
 from .base import DetectedFailure, JobContext
+from .patterns import (
+    GO_TEST_FAIL_PATTERN,
+    HASH_MISMATCH_PAIRING_WINDOW,
+    HASH_MISMATCH_PATTERN,
+)
 
-
-_HASH_MISMATCH_PATTERN = re.compile(r"file hashes don't match", re.IGNORECASE)
-_FAIL_PATTERN = re.compile(r"---\s+FAIL:\s+(?P<test_name>\S+)")
-_PAIRING_WINDOW = 50
 
 _WAREHOUSE_KEYWORDS = ("postgres", "snowflake", "redshift", "databricks", "bigquery")
 
@@ -53,8 +53,8 @@ class HashMismatchDetector:
     ``extracted_fields`` keys are conditional:
 
     * ``test_name``: present only when a FAIL line was paired within
-      ``_PAIRING_WINDOW`` lines in the same step. Unpaired mismatches
-      omit this key.
+      ``HASH_MISMATCH_PAIRING_WINDOW`` lines in the same step. Unpaired
+      mismatches omit this key.
     * ``warehouse_target``: present only when ``job_context.job_name``
       contains one of the known warehouse keywords (postgres, snowflake,
       redshift, databricks, bigquery). Unknown / missing job names
@@ -73,14 +73,7 @@ class HashMismatchDetector:
         parsed_lines: Sequence[ParsedLine],
         job_context: JobContext,
     ) -> list[DetectedFailure]:
-        mismatch_lines: list[ParsedLine] = []
-        fail_lines: list[tuple[ParsedLine, str]] = []
-        for line in parsed_lines:
-            if _HASH_MISMATCH_PATTERN.search(line.content):
-                mismatch_lines.append(line)
-            fail_match = _FAIL_PATTERN.search(line.content)
-            if fail_match:
-                fail_lines.append((line, fail_match.group("test_name")))
+        mismatch_lines, fail_lines = _collect_mismatch_and_fail_lines(parsed_lines)
 
         warehouse_target = _infer_warehouse(job_context.job_name)
         failures: list[DetectedFailure] = []
@@ -116,11 +109,26 @@ class HashMismatchDetector:
         return failures
 
 
+def _collect_mismatch_and_fail_lines(
+    parsed_lines: Sequence[ParsedLine],
+) -> tuple[list[ParsedLine], list[tuple[ParsedLine, str]]]:
+    """Single forward pass collecting hash-mismatch and FAIL lines."""
+    mismatch_lines: list[ParsedLine] = []
+    fail_lines: list[tuple[ParsedLine, str]] = []
+    for line in parsed_lines:
+        if HASH_MISMATCH_PATTERN.search(line.content):
+            mismatch_lines.append(line)
+        fail_match = GO_TEST_FAIL_PATTERN.search(line.content)
+        if fail_match:
+            fail_lines.append((line, fail_match.group("test_name")))
+    return mismatch_lines, fail_lines
+
+
 def _nearest_fail(
     mismatch: ParsedLine,
     fail_lines: Sequence[tuple[ParsedLine, str]],
 ) -> Optional[tuple[ParsedLine, str]]:
-    """Return the FAIL line nearest to ``mismatch`` within ``_PAIRING_WINDOW`` lines.
+    """Return the FAIL line nearest to ``mismatch`` within ``HASH_MISMATCH_PAIRING_WINDOW`` lines.
 
     Tie-break: equidistant candidates resolve to the EARLIER (smaller line number)
     one. ``fail_lines`` is populated in the single forward pass over parsed lines,
@@ -132,11 +140,28 @@ def _nearest_fail(
         (fail_line, test_name)
         for fail_line, test_name in fail_lines
         if fail_line.step_id == mismatch.step_id
-        and abs(fail_line.line_number - mismatch.line_number) <= _PAIRING_WINDOW
+        and abs(fail_line.line_number - mismatch.line_number) <= HASH_MISMATCH_PAIRING_WINDOW
     ]
     if not candidates:
         return None
     return min(candidates, key=lambda item: abs(item[0].line_number - mismatch.line_number))
+
+
+def hash_mismatch_claimed_fail_lines(parsed_lines: Sequence[ParsedLine]) -> set[int]:
+    """Return the set of FAIL line numbers claimed by HashMismatchDetector.
+
+    Used by GoTestFailDetector to skip exactly the FAIL lines that
+    HashMismatchDetector will pair. Mirrors the same nearest-FAIL-per-mismatch
+    semantics so the two detectors never disagree on ownership.
+    """
+    mismatch_lines, fail_lines = _collect_mismatch_and_fail_lines(parsed_lines)
+    claimed: set[int] = set()
+    for mismatch in mismatch_lines:
+        paired = _nearest_fail(mismatch, fail_lines)
+        if paired is not None:
+            fail_line, _ = paired
+            claimed.add(fail_line.line_number)
+    return claimed
 
 
 def _infer_warehouse(job_name: Optional[str]) -> Optional[str]:
@@ -149,4 +174,4 @@ def _infer_warehouse(job_name: Optional[str]) -> Optional[str]:
     return None
 
 
-__all__ = ["HashMismatchDetector"]
+__all__ = ["HashMismatchDetector", "hash_mismatch_claimed_fail_lines"]

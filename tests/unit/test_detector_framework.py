@@ -6,8 +6,12 @@ from ci_log_intelligence.models import ParsedLine
 from ci_log_intelligence.reducer.detectors import (
     DetectedFailure,
     GenericDetector,
+    GoTestFailDetector,
     HashMismatchDetector,
+    JUnitXmlDetector,
     JobContext,
+    PytestFailDetector,
+    RustTestFailDetector,
     detected_failures_to_anchors,
     get_detectors,
     run_detectors,
@@ -181,10 +185,24 @@ class DetectorFrameworkRegistryTests(unittest.TestCase):
     def test_registry_lists_specialized_detectors_before_generic(self) -> None:
         detectors = get_detectors()
 
-        self.assertEqual([d.name for d in detectors], ["hash_mismatch", "generic"])
+        self.assertEqual(
+            [d.name for d in detectors],
+            [
+                "hash_mismatch",
+                "go_test_fail",
+                "pytest_fail",
+                "rust_test_fail",
+                "junit_xml",
+                "generic",
+            ],
+        )
         self.assertIsInstance(detectors[0], HashMismatchDetector)
-        self.assertIsInstance(detectors[1], GenericDetector)
-        self.assertEqual(detectors[1].failure_type, "generic")
+        self.assertIsInstance(detectors[1], GoTestFailDetector)
+        self.assertIsInstance(detectors[2], PytestFailDetector)
+        self.assertIsInstance(detectors[3], RustTestFailDetector)
+        self.assertIsInstance(detectors[4], JUnitXmlDetector)
+        self.assertIsInstance(detectors[5], GenericDetector)
+        self.assertEqual(detectors[-1].failure_type, "generic")
 
     def test_run_detectors_accepts_explicit_detector_sequence(self) -> None:
         lines = [_make_line(1, "ERROR x")]

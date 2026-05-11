@@ -37,7 +37,13 @@ _TIMESTAMP_PREFIX_PATTERN = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\s+"
 )
 
-def _strip_timestamp_prefix(content: str) -> str:
+def strip_timestamp_prefix(content: str) -> str:
+    """Strip a leading GitHub Actions ``YYYY-MM-DDTHH:MM:SS[.fff]Z`` timestamp.
+
+    Detectors that anchor on ``^`` must apply this first so a timestamp-prefixed
+    log line still matches start-of-line patterns. Returns ``content`` unchanged
+    when no timestamp prefix is present.
+    """
     return _TIMESTAMP_PREFIX_PATTERN.sub("", content, count=1)
 
 
@@ -64,7 +70,7 @@ def parse_log(stored_log: StoredLog, storage_backend: StorageBackend) -> list[Pa
 
 
 def detect_step_id(content: str) -> Optional[str]:
-    candidates = (content, _strip_timestamp_prefix(content))
+    candidates = (content, strip_timestamp_prefix(content))
     for candidate in candidates:
         for pattern in _STEP_PATTERNS:
             match = pattern.search(candidate)
@@ -74,7 +80,7 @@ def detect_step_id(content: str) -> Optional[str]:
 
 
 def parse_timestamp(content: str) -> Optional[datetime]:
-    candidates = (content, _strip_timestamp_prefix(content))
+    candidates = (content, strip_timestamp_prefix(content))
     for candidate in candidates:
         for time_format, pattern in _TIMESTAMP_PATTERNS:
             match = pattern.search(candidate)
@@ -97,3 +103,13 @@ def detect_signals(content: str) -> list[str]:
 
 def iter_signal_lines(lines: Iterable[ParsedLine]) -> list[ParsedLine]:
     return [line for line in lines if line.signals]
+
+
+__all__ = [
+    "detect_signals",
+    "detect_step_id",
+    "iter_signal_lines",
+    "parse_log",
+    "parse_timestamp",
+    "strip_timestamp_prefix",
+]
