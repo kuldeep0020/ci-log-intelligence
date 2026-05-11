@@ -13,6 +13,7 @@ from .ingestion.github.models import (
     RootCauseSummary,
 )
 from .ingestion.github.resolver import resolve_github_url
+from .models import ScoredBlock
 from .parsing import parse_log
 from .reducer import reduce_parsed_lines
 from .reducer.comparison import (
@@ -122,16 +123,16 @@ def _build_report(
         root_cause = RootCauseSummary(
             summary="No failing jobs found in the analyzed CI runs.",
             log_excerpt="",
-            confidence=0.0,
+            has_traceback=False,
+            has_stack_trace=False,
+            has_assertion=False,
+            score=0.0,
+            score_components={},
         )
         failed_block_views: list[FailedBlockView] = []
     else:
         analysis, scored_block = root_cause_candidate
-        root_cause = RootCauseSummary(
-            summary=summarize_failed_block(scored_block, analysis.log.job_name, analysis.log.run_id),
-            log_excerpt=render_block_excerpt(scored_block),
-            confidence=round(min(0.99, 0.4 + (scored_block.score / 20.0)), 2),
-        )
+        root_cause = _summarize_root_cause(scored_block, analysis.log.job_name, analysis.log.run_id)
         failed_block_views = []
         for analysis in sorted(
             failed_analyses,
@@ -162,6 +163,46 @@ def _build_report(
         passed_context=passed_context_views,
         cross_run_insights=list(insights),
         metadata=metadata,
+    )
+
+
+def _summarize_root_cause(
+    scored_block: ScoredBlock,
+    job_name: str,
+    run_id: int,
+) -> RootCauseSummary:
+    block_signals = {signal for line in scored_block.block.lines for signal in line.signals}
+    has_traceback = "traceback" in block_signals
+    has_stack_trace = any(
+        line.content.startswith("  File ") or line.content.startswith("    ")
+        for line in scored_block.block.lines
+    )
+    has_assertion = "assertion_error" in block_signals or any(
+        "AssertionError" in line.content for line in scored_block.block.lines
+    )
+    highest_anchor_severity = max(
+        (anchor.severity for anchor in scored_block.block.anchors), default=0
+    )
+    signal_density = (
+        sum(len(line.signals) for line in scored_block.block.lines)
+        / max(len(scored_block.block.lines), 1)
+    )
+    duplicate_penalty = round(
+        (highest_anchor_severity * 5.0) + signal_density - scored_block.score, 6
+    )
+    score_components = {
+        "severity_weight": float(highest_anchor_severity * 5.0),
+        "signal_density": round(signal_density, 6),
+        "duplicate_penalty": duplicate_penalty if duplicate_penalty > 0 else 0.0,
+    }
+    return RootCauseSummary(
+        summary=summarize_failed_block(scored_block, job_name, run_id),
+        log_excerpt=render_block_excerpt(scored_block),
+        has_traceback=has_traceback,
+        has_stack_trace=has_stack_trace,
+        has_assertion=has_assertion,
+        score=scored_block.score,
+        score_components=score_components,
     )
 
 

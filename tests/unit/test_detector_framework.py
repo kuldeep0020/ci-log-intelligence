@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 
 from ci_log_intelligence.models import ParsedLine
-from ci_log_intelligence.reducer.anchors import detect_anchors
 from ci_log_intelligence.reducer.detectors import (
     DetectedFailure,
     GenericDetector,
@@ -20,11 +19,6 @@ def _make_line(line_number: int, content: str) -> ParsedLine:
 
 def _empty_context() -> JobContext:
     return JobContext(job_name=None, run_id=None, repo=None)
-
-
-def _normalized_anchor_keys(anchors):
-    keys = [(a.line_number, a.type, a.severity) for a in anchors]
-    return sorted(keys, key=lambda item: (item[0], -item[2], item[1]))
 
 
 class DetectorFrameworkEmptyInputTests(unittest.TestCase):
@@ -92,78 +86,94 @@ class DetectorFrameworkMultiSignalLineTests(unittest.TestCase):
             [(7, "error", 3), (7, "failed", 2), (7, "assertion_error", 2)],
         )
 
-    def test_repeated_token_on_same_line_emits_single_anchor(self) -> None:
-        lines = [_make_line(1, "ERROR ERROR ERROR")]
 
-        failures = run_detectors(lines, _empty_context())
-        anchors = detected_failures_to_anchors(failures)
-
-        # ``re.search`` matches once per pattern per line; both legacy and new path must agree.
-        legacy_anchors = detect_anchors(lines)
-        self.assertEqual(len(anchors), len(legacy_anchors))
-        self.assertEqual(len(anchors), 1)
-        self.assertEqual(anchors[0].type, "error")
-
-
-class DetectorFrameworkAllTiersTests(unittest.TestCase):
-    def test_all_seven_tiers_match_legacy_detect_anchors_counts(self) -> None:
+class DetectorFrameworkHardenedPatternTests(unittest.TestCase):
+    def test_exception_word_boundary_skips_identifiers(self) -> None:
         lines = [
-            _make_line(1, "Traceback (most recent call last):"),
-            _make_line(2, "Exception raised in module"),
-            _make_line(3, "ERROR build failed"),
-            _make_line(4, "FAILED test_example"),
-            _make_line(5, "AssertionError mismatch"),
-            _make_line(6, "WARNING flaky cache"),
-            _make_line(7, "Retrying request"),
+            _make_line(1, "class MyExceptionHandler: pass"),
+            _make_line(2, "OperationsExceptional was called"),
         ]
 
-        legacy_anchors = detect_anchors(lines)
         failures = run_detectors(lines, _empty_context())
-        new_anchors = detected_failures_to_anchors(failures)
 
-        self.assertEqual(len(new_anchors), len(legacy_anchors))
-        self.assertEqual(
-            _normalized_anchor_keys(new_anchors),
-            _normalized_anchor_keys(legacy_anchors),
+        self.assertEqual(failures, [])
+
+    def test_error_keyword_is_case_insensitive(self) -> None:
+        lines = [
+            _make_line(1, "Error: file not found"),
+            _make_line(2, "error: file not found"),
+            _make_line(3, "ERROR: file not found"),
+        ]
+
+        failures = run_detectors(lines, _empty_context())
+
+        self.assertEqual(len(failures), 3)
+        self.assertTrue(
+            all(f.extracted_fields["signal_name"] == "error" for f in failures)
         )
 
+    def test_error_word_boundary_skips_identifiers(self) -> None:
+        lines = [_make_line(1, "ErrorContext was constructed by errorBuilder")]
 
-class DetectorFrameworkParityTests(unittest.TestCase):
-    def test_parity_with_legacy_detect_anchors_on_mixed_input(self) -> None:
+        failures = run_detectors(lines, _empty_context())
+
+        # ``Error`` here is part of CamelCase identifiers -- the ``\b`` boundary
+        # should not promote that to a standalone ``ERROR`` keyword match.
+        self.assertEqual(failures, [])
+
+    def test_benign_no_errors_phrase_suppresses_error_anchor(self) -> None:
         lines = [
-            _make_line(1, "starting build"),
-            _make_line(2, "Traceback (most recent call last):"),
-            _make_line(3, "  File 'foo.py', line 10, in bar"),
-            _make_line(4, "Exception: bad input"),
-            _make_line(5, "ERROR could not read config"),
-            _make_line(6, "FAILED test_alpha"),
-            _make_line(7, "AssertionError: 1 != 2"),
-            _make_line(8, "WARNING deprecated flag"),
-            _make_line(9, "Retrying request after timeout"),
-            _make_line(10, "informational output"),
-            _make_line(11, "ERROR FAILED AssertionError combined"),
-            _make_line(12, "Exception while Retrying"),
-            _make_line(13, "WARNING and ERROR on same line"),
-            _make_line(14, "clean line"),
-            _make_line(15, "another clean line"),
-            _make_line(16, "Traceback (most recent call last): with Exception"),
-            _make_line(17, "FAILED again"),
-            _make_line(18, "ERROR"),
-            _make_line(19, "Retrying"),
-            _make_line(20, "done"),
+            _make_line(1, "[INFO] No errors found"),
+            _make_line(2, "[INFO] No error in build"),
+            _make_line(3, "0 error reports"),
         ]
 
-        legacy_anchors = detect_anchors(lines)
         failures = run_detectors(lines, _empty_context())
-        new_anchors = detected_failures_to_anchors(failures)
 
-        self.assertEqual(len(new_anchors), len(legacy_anchors))
+        self.assertEqual(failures, [])
 
-        sorted_legacy = _normalized_anchor_keys(legacy_anchors)
-        sorted_new = _normalized_anchor_keys(new_anchors)
-        self.assertEqual(sorted_new, sorted_legacy)
-        for new_key, legacy_key in zip(sorted_new, sorted_legacy):
-            self.assertEqual(new_key, legacy_key)
+    def test_benign_zero_failures_phrase_suppresses_failed_anchor(self) -> None:
+        lines = [
+            _make_line(1, "0 failures, 0 errors"),
+            _make_line(2, "errors: 0"),
+            _make_line(3, "no failures detected this run"),
+        ]
+
+        failures = run_detectors(lines, _empty_context())
+
+        self.assertEqual(failures, [])
+
+    def test_benign_filter_only_suppresses_error_failed_warning_signals(self) -> None:
+        # ``Traceback``/``Exception``/``AssertionError``/``Retrying`` signals
+        # must still anchor even when the line also matches the benign filter,
+        # because real Python tracebacks never appear inside zero-count reports
+        # but the tokens are unambiguous when they do appear.
+        lines = [
+            _make_line(
+                1,
+                "Traceback (most recent call last): Exception with 0 errors AssertionError",
+            )
+        ]
+
+        failures = run_detectors(lines, _empty_context())
+
+        signal_names = sorted(f.extracted_fields["signal_name"] for f in failures)
+        self.assertEqual(
+            signal_names, ["assertion_error", "exception", "traceback"]
+        )
+
+    def test_failed_keyword_is_case_insensitive(self) -> None:
+        lines = [
+            _make_line(1, "test Failed for reason X"),
+            _make_line(2, "build failed: missing dep"),
+        ]
+
+        failures = run_detectors(lines, _empty_context())
+
+        self.assertEqual(len(failures), 2)
+        self.assertTrue(
+            all(f.extracted_fields["signal_name"] == "failed" for f in failures)
+        )
 
 
 class DetectorFrameworkRegistryTests(unittest.TestCase):

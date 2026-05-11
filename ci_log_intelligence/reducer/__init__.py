@@ -6,7 +6,6 @@ from typing import Iterable, Optional
 from ..models import ReductionResult, ScoredBlock
 from ..utils.logging import get_structured_logger, log_stage_event
 from ..utils.metrics import MetricsCollector, measure_stage
-from .anchors import detect_anchors
 from .classification import classify_blocks, rank_blocks
 from .clustering import build_clusters
 from .detectors import JobContext, detected_failures_to_anchors, run_detectors
@@ -27,13 +26,13 @@ def reduce_parsed_lines(
     structured_logger = logger or get_structured_logger("ci_log_intelligence.reducer")
 
     effective_job_context = job_context or JobContext(job_name=None, run_id=None, repo=None)
-    with measure_stage("detect_anchors", collector, structured_logger):
+    with measure_stage("detect_failures", collector, structured_logger):
         # Step 1 scaffolding: detected_failures will be plumbed through ``ReductionResult`` in step 3.
         # Today it is built only to feed ``detected_failures_to_anchors``.
         detected_failures = run_detectors(parsed_line_list, effective_job_context)
         anchors = detected_failures_to_anchors(detected_failures)
     collector.record_metric("number_of_anchors", float(len(anchors)))
-    log_stage_event(structured_logger, "detect_anchors", anchors=len(anchors))
+    log_stage_event(structured_logger, "detect_failures", anchors=len(anchors))
 
     with measure_stage("build_clusters", collector, structured_logger):
         clusters = build_clusters(anchors, parsed_line_list)
@@ -52,7 +51,7 @@ def reduce_parsed_lines(
     log_stage_event(structured_logger, "merge_blocks", blocks=len(merged_blocks))
 
     with measure_stage("score_blocks", collector, structured_logger):
-        scored_blocks = score_blocks(merged_blocks, total_lines=len(parsed_line_list))
+        scored_blocks = score_blocks(merged_blocks)
     log_stage_event(structured_logger, "score_blocks", blocks=len(scored_blocks))
 
     with measure_stage("classify_blocks", collector, structured_logger):
@@ -69,7 +68,6 @@ def reduce_parsed_lines(
 
 __all__ = [
     "classify_blocks",
-    "detect_anchors",
     "expand_context",
     "merge_blocks",
     "rank_blocks",

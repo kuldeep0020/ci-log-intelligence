@@ -16,7 +16,7 @@ Traceback (most recent call last):
 AssertionError
 STEP: retry
 Retrying request
-WARNING transient error
+WARNING transient flake detected
 """
 
 

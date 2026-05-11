@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Iterable, Optional
 
 from ..models import ParsedLine, StoredLog
+from ..signals import SIGNAL_PATTERNS, is_benign_mention, signal_is_filterable
 from ..storage import StorageBackend
 
 _STEP_PATTERNS = [
@@ -12,6 +13,8 @@ _STEP_PATTERNS = [
     re.compile(r"^\[step:(?P<step>[^\]]+)\]\s*$"),
     re.compile(r"^::group::(?P<step>.+?)\s*$"),
     re.compile(r"^##\[group\](?P<step>.+?)\s*$"),
+    re.compile(r"^=+>>?\s+(?P<step>.+?)\s*$"),
+    re.compile(r"^---\s+(?P<step>\S.+?)\s*$"),
 ]
 
 _TIMESTAMP_PATTERNS = [
@@ -19,15 +22,17 @@ _TIMESTAMP_PATTERNS = [
     ("%Y-%m-%dT%H:%M:%S", re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")),
 ]
 
-_SIGNAL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("traceback", re.compile(r"Traceback \(most recent call last\):")),
-    ("exception", re.compile(r"Exception")),
-    ("error", re.compile(r"ERROR")),
-    ("failed", re.compile(r"FAILED")),
-    ("assertion_error", re.compile(r"AssertionError")),
-    ("warning", re.compile(r"WARNING")),
-    ("retrying", re.compile(r"Retrying")),
-]
+# GitHub Actions raw log lines are prefixed with a UTC timestamp of the form
+# ``2024-01-15T12:34:56.789Z`` (milliseconds optional, trailing ``Z`` optional).
+# Step-marker and timestamp detection patterns are anchored with ``^`` so they
+# must be applied to a prefix-stripped variant of the line as well as the raw
+# original.
+_TIMESTAMP_PREFIX_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\s+"
+)
+
+def _strip_timestamp_prefix(content: str) -> str:
+    return _TIMESTAMP_PREFIX_PATTERN.sub("", content, count=1)
 
 
 def parse_log(stored_log: StoredLog, storage_backend: StorageBackend) -> list[ParsedLine]:
@@ -53,23 +58,34 @@ def parse_log(stored_log: StoredLog, storage_backend: StorageBackend) -> list[Pa
 
 
 def detect_step_id(content: str) -> Optional[str]:
-    for pattern in _STEP_PATTERNS:
-        match = pattern.search(content)
-        if match:
-            return match.group("step").strip()
+    candidates = (content, _strip_timestamp_prefix(content))
+    for candidate in candidates:
+        for pattern in _STEP_PATTERNS:
+            match = pattern.search(candidate)
+            if match:
+                return match.group("step").strip()
     return None
 
 
 def parse_timestamp(content: str) -> Optional[datetime]:
-    for time_format, pattern in _TIMESTAMP_PATTERNS:
-        match = pattern.search(content)
-        if match:
-            return datetime.strptime(match.group("ts"), time_format)
+    candidates = (content, _strip_timestamp_prefix(content))
+    for candidate in candidates:
+        for time_format, pattern in _TIMESTAMP_PATTERNS:
+            match = pattern.search(candidate)
+            if match:
+                return datetime.strptime(match.group("ts"), time_format)
     return None
 
 
 def detect_signals(content: str) -> list[str]:
-    signals = [name for name, pattern in _SIGNAL_PATTERNS if pattern.search(content)]
+    benign = is_benign_mention(content)
+    signals: list[str] = []
+    for name, _severity, pattern in SIGNAL_PATTERNS:
+        if not pattern.search(content):
+            continue
+        if benign and signal_is_filterable(name):
+            continue
+        signals.append(name)
     return signals
 
 

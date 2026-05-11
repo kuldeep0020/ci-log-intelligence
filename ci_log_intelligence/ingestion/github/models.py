@@ -70,13 +70,21 @@ class PassedContextExcerpt:
 class RootCauseSummary:
     summary: str
     log_excerpt: str
-    confidence: float
+    has_traceback: bool
+    has_stack_trace: bool
+    has_assertion: bool
+    score: float
+    score_components: dict[str, float]
 
     def to_dict(self) -> dict[str, object]:
         return {
             "summary": self.summary,
             "log_excerpt": self.log_excerpt,
-            "confidence": self.confidence,
+            "has_traceback": self.has_traceback,
+            "has_stack_trace": self.has_stack_trace,
+            "has_assertion": self.has_assertion,
+            "score": self.score,
+            "score_components": dict(self.score_components),
         }
 
 

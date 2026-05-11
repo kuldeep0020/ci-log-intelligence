@@ -10,6 +10,7 @@ from ...ingestion.github.models import FailedLogAnalysis, PassedContextExcerpt
 from ...models import ParsedLine, ScoredBlock
 from ...parsing import parse_log
 from ...storage import InMemoryStorage
+from .excerpt import render_block_excerpt
 
 _TEST_NAME_PATTERNS = [
     re.compile(r"\b[\w./-]+::[\w.\[\]-]+\b"),
@@ -140,14 +141,18 @@ def select_root_cause(
         return None
 
     classification_priority = {"root_cause": 0, "symptom": 1, "flaky": 2}
+    # Tiebreaks after score and classification: traceback-bearing first, then
+    # deeper stack, then earliest position, then job name, then newest run.
     return sorted(
         candidates,
         key=lambda item: (
             -item[1].score,
             classification_priority.get(item[1].classification, 99),
-            -item[0].log.run_id,
-            item[0].log.job_name.lower(),
+            not _has_traceback(item[1]),
+            -_stack_depth(item[1]),
             item[1].block.start_line,
+            item[0].log.job_name.lower(),
+            -item[0].log.run_id,
         ),
     )[0]
 
@@ -161,9 +166,20 @@ def summarize_failed_block(scored_block: ScoredBlock, job_name: str, run_id: int
     )
 
 
-def render_block_excerpt(scored_block: ScoredBlock, max_lines: int = 20) -> str:
-    selected_lines = [line.content for line in scored_block.block.lines[:max_lines]]
-    return "\n".join(selected_lines)
+def _block_signals(scored_block: ScoredBlock) -> set[str]:
+    return {signal for line in scored_block.block.lines for signal in line.signals}
+
+
+def _has_traceback(scored_block: ScoredBlock) -> bool:
+    return "traceback" in _block_signals(scored_block)
+
+
+def _stack_depth(scored_block: ScoredBlock) -> int:
+    count = 0
+    for line in scored_block.block.lines:
+        if line.content.startswith("  File ") or line.content.startswith("    "):
+            count += 1
+    return count
 
 
 def _build_failed_criteria(failed_analyses: Iterable[FailedLogAnalysis]) -> dict[str, dict[str, set[str]]]:

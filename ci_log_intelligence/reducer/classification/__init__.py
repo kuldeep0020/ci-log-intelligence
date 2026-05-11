@@ -32,6 +32,9 @@ def classify_blocks(blocks: Iterable[ScoredBlock]) -> List[ScoredBlock]:
 
 def rank_blocks(blocks: Iterable[ScoredBlock]) -> List[ScoredBlock]:
     classification_priority = {"root_cause": 0, "symptom": 1, "flaky": 2, "unclassified": 3}
+    # ``start_line`` is the earliest-first tiebreak; this replaces the former
+    # recency-based scoring boost. Cascading failures now correctly rank
+    # the earliest equivalent-score block first.
     return sorted(
         blocks,
         key=lambda scored_block: (
