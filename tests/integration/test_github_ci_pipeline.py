@@ -93,7 +93,16 @@ class GitHubCIPipelineIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["metadata"]["total_runs_analyzed"], 2)
         self.assertEqual(payload["metadata"]["failed_runs"], 1)
         self.assertEqual(payload["metadata"]["passed_runs"], 1)
-        self.assertEqual(len(payload["failed_blocks"]), 1)
+        self.assertEqual(len(payload["failures"]), 1)
+        only_failure = payload["failures"][0]
+        self.assertEqual(only_failure["type"], "generic")
+        self.assertIn("classification", only_failure)
+        self.assertIn("score", only_failure)
+        self.assertIn("start_line", only_failure)
+        self.assertIn("end_line", only_failure)
+        self.assertIn("summary", only_failure)
+        self.assertIn("log_excerpt", only_failure)
+        self.assertIn("extracted_fields", only_failure)
         self.assertEqual(payload["passed_context"][0]["job_name"], "test-redshift")
         self.assertNotIn("repos/acme/widgets/actions/jobs/402/logs", transport.requested_text_endpoints)
         self.assertIn(

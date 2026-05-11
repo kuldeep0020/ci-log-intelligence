@@ -2,8 +2,18 @@ from __future__ import annotations
 
 import unittest
 
-from ci_log_intelligence.models import Anchor, LogBlock, ParsedLine, ScoredBlock
+from ci_log_intelligence.models import (
+    Anchor,
+    LogBlock,
+    ParsedLine,
+    ScoreComponents,
+    ScoredBlock,
+)
 from ci_log_intelligence.reducer.classification import classify_blocks
+
+
+def _trivial_components() -> ScoreComponents:
+    return ScoreComponents(severity_weight=0.0, signal_density=0.0, duplicate_penalty=0.0)
 
 
 class ClassifyBlocksTests(unittest.TestCase):
@@ -17,6 +27,7 @@ class ClassifyBlocksTests(unittest.TestCase):
             ),
             score=10.0,
             classification="unclassified",
+            score_components=_trivial_components(),
         )
         symptom_block = ScoredBlock(
             block=LogBlock(
@@ -27,6 +38,7 @@ class ClassifyBlocksTests(unittest.TestCase):
             ),
             score=5.0,
             classification="unclassified",
+            score_components=_trivial_components(),
         )
         flaky_block = ScoredBlock(
             block=LogBlock(
@@ -37,6 +49,7 @@ class ClassifyBlocksTests(unittest.TestCase):
             ),
             score=3.0,
             classification="unclassified",
+            score_components=_trivial_components(),
         )
 
         classified = classify_blocks([root_block, symptom_block, flaky_block])

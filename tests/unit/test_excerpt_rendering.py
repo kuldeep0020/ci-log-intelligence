@@ -3,12 +3,22 @@ from __future__ import annotations
 import unittest
 
 from ci_log_intelligence import analyze_log
-from ci_log_intelligence.models import Anchor, LogBlock, ParsedLine, ScoredBlock
+from ci_log_intelligence.models import (
+    Anchor,
+    LogBlock,
+    ParsedLine,
+    ScoreComponents,
+    ScoredBlock,
+)
 from ci_log_intelligence.reducer.comparison import render_block_excerpt
 
 
 def _line(line_number: int, content: str, signals=None) -> ParsedLine:
     return ParsedLine(line_number, content, None, "test", list(signals or []))
+
+
+def _trivial_components() -> ScoreComponents:
+    return ScoreComponents(severity_weight=0.0, signal_density=0.0, duplicate_penalty=0.0)
 
 
 def _block(start: int, end: int, contents, anchors) -> ScoredBlock:
@@ -21,6 +31,7 @@ def _block(start: int, end: int, contents, anchors) -> ScoredBlock:
         ),
         score=0.0,
         classification="root_cause",
+        score_components=_trivial_components(),
     )
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
-from ...models import LogBlock, ScoredBlock
+from ...models import LogBlock, ScoreComponents, ScoredBlock
 
 
 def score_blocks(blocks: Iterable[LogBlock]) -> List[ScoredBlock]:
@@ -14,15 +14,24 @@ def score_blocks(blocks: Iterable[LogBlock]) -> List[ScoredBlock]:
     summaries at line 800 would rank the summary higher). The position term
     has been removed; ranking continues to break ties by earliest
     ``start_line`` via ``rank_blocks``.
+
+    Each scored block carries a typed ``ScoreComponents`` value so downstream
+    code can read severity/density/penalty directly instead of reconstructing
+    them from the formula.
     """
     scored_blocks: list[ScoredBlock] = []
 
     for block in blocks:
         highest_anchor_severity = max((anchor.severity for anchor in block.anchors), default=0)
-        signal_density = _signal_density(block)
-        duplicate_penalty = _duplicate_penalty(block)
+        density = _signal_density(block)
+        penalty = _duplicate_penalty(block)
+        components = ScoreComponents(
+            severity_weight=float(highest_anchor_severity) * 5.0,
+            signal_density=round(density, 6),
+            duplicate_penalty=round(penalty, 6),
+        )
         score = round(
-            (highest_anchor_severity * 5.0) + signal_density - duplicate_penalty,
+            components.severity_weight + components.signal_density - components.duplicate_penalty,
             6,
         )
         scored_blocks.append(
@@ -30,6 +39,7 @@ def score_blocks(blocks: Iterable[LogBlock]) -> List[ScoredBlock]:
                 block=block,
                 score=score,
                 classification="unclassified",
+                score_components=components,
             )
         )
 

@@ -43,11 +43,16 @@ def main(argv: list[str] | None = None) -> int:
         print("Log excerpt:")
         print(report.root_cause.log_excerpt)
 
-    if report.failed_blocks:
+    if report.failures:
         print()
-        print("Failed blocks:")
-        for block in report.failed_blocks:
-            print(f"- {block.summary}")
+        print("Failures:")
+        for failure in report.failures:
+            print(f"- [{failure.type}/{failure.classification}] {failure.summary}")
+            if failure.extracted_fields:
+                kv = ", ".join(
+                    f"{k}={v}" for k, v in sorted(failure.extracted_fields.items())
+                )
+                print(f"    {kv}")
 
     if report.passed_context:
         print()

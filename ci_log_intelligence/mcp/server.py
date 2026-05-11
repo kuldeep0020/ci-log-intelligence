@@ -11,6 +11,35 @@ server = FastMCP("ci-log-intelligence")
 
 @server.tool(name="analyze_ci_failure")
 def analyze_ci_failure(ci_url: str) -> dict[str, object]:
+    """Analyze a GitHub CI failure URL and return a focused, typed failure report.
+
+    Input: GitHub PR URL, workflow run URL, or job URL.
+
+    Response shape:
+        {
+            "root_cause": {"summary", "log_excerpt", "has_traceback",
+                           "has_stack_trace", "has_assertion", "score",
+                           "score_components"},
+            "failures": [
+                {
+                    "type": "generic" | "hash_mismatch" | ...,
+                    "classification": "root_cause" | "symptom" | "flaky",
+                    "severity": 1 | 2 | 3,
+                    "score": float,
+                    "start_line": int,
+                    "end_line": int,
+                    "summary": str,
+                    "log_excerpt": str,
+                    "extracted_fields": {...type-specific...}
+                }
+            ],
+            "passed_context": [{"job_name", "excerpt"}],
+            "cross_run_insights": [str],
+            "metadata": {"total_runs_analyzed", "failed_runs", "passed_runs"}
+        }
+
+    The reducer is deterministic; identical input produces identical output.
+    """
     report = analyze_ci_url(
         ci_url,
         include_passed=True,

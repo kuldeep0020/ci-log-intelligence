@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
-from ...models import ReductionResult
+from ...models import ReductionResult, ScoreComponents
 
 
 @dataclass(slots=True, frozen=True)
@@ -74,7 +74,7 @@ class RootCauseSummary:
     has_stack_trace: bool
     has_assertion: bool
     score: float
-    score_components: dict[str, float]
+    score_components: ScoreComponents
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -84,21 +84,42 @@ class RootCauseSummary:
             "has_stack_trace": self.has_stack_trace,
             "has_assertion": self.has_assertion,
             "score": self.score,
-            "score_components": dict(self.score_components),
+            "score_components": self.score_components.to_dict(),
         }
 
 
 @dataclass(slots=True, frozen=True)
-class FailedBlockView:
+class FailureRecord:
+    """One typed failure record. Discriminated by ``type``.
+
+    ``type`` reflects the most specific contributing detector for the block.
+    For v1 the only value is ``"generic"``. Step 4 will introduce
+    ``"hash_mismatch"``; step 5 will add ``"go_test_fail"``,
+    ``"build_error_rust"``, etc. The agent reads ``type`` and narrows
+    ``extracted_fields`` accordingly.
+    """
+
+    type: str
+    classification: str
+    severity: int
+    score: float
     start_line: int
     end_line: int
     summary: str
+    log_excerpt: str
+    extracted_fields: dict[str, Any]
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "type": self.type,
+            "classification": self.classification,
+            "severity": self.severity,
+            "score": self.score,
             "start_line": self.start_line,
             "end_line": self.end_line,
             "summary": self.summary,
+            "log_excerpt": self.log_excerpt,
+            "extracted_fields": dict(self.extracted_fields),
         }
 
 
@@ -131,7 +152,7 @@ class AnalysisMetadata:
 @dataclass(slots=True, frozen=True)
 class CIAnalysisReport:
     root_cause: RootCauseSummary
-    failed_blocks: list[FailedBlockView]
+    failures: list[FailureRecord]
     passed_context: list[PassedContextView]
     cross_run_insights: list[str]
     metadata: AnalysisMetadata
@@ -139,7 +160,7 @@ class CIAnalysisReport:
     def to_dict(self) -> dict[str, object]:
         return {
             "root_cause": self.root_cause.to_dict(),
-            "failed_blocks": [item.to_dict() for item in self.failed_blocks],
+            "failures": [item.to_dict() for item in self.failures],
             "passed_context": [item.to_dict() for item in self.passed_context],
             "cross_run_insights": list(self.cross_run_insights),
             "metadata": self.metadata.to_dict(),

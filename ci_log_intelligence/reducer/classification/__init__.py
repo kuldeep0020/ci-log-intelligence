@@ -24,6 +24,7 @@ def classify_blocks(blocks: Iterable[ScoredBlock]) -> List[ScoredBlock]:
                 block=scored_block.block,
                 score=scored_block.score,
                 classification=classification,
+                score_components=scored_block.score_components,
             )
         )
 

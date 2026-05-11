@@ -7,11 +7,22 @@ from ci_log_intelligence.ingestion.github.models import (
     NormalizedLog,
     PassedContextExcerpt,
 )
-from ci_log_intelligence.models import Anchor, LogBlock, ParsedLine, ReductionResult, ScoredBlock
+from ci_log_intelligence.models import (
+    Anchor,
+    LogBlock,
+    ParsedLine,
+    ReductionResult,
+    ScoreComponents,
+    ScoredBlock,
+)
 from ci_log_intelligence.reducer.comparison.analyzer import (
     analyze_cross_run,
     select_root_cause,
 )
+
+
+def _trivial_components() -> ScoreComponents:
+    return ScoreComponents(severity_weight=0.0, signal_density=0.0, duplicate_penalty=0.0)
 
 
 def _make_analysis(
@@ -43,6 +54,7 @@ def _make_analysis(
                     ),
                     score=score,
                     classification=classification,
+                    score_components=_trivial_components(),
                 )
             ],
             summary=None,
@@ -75,6 +87,7 @@ class ComparisonAnalyzerCrossRunTests(unittest.TestCase):
                         ),
                         score=12.0,
                         classification="root_cause",
+                        score_components=_trivial_components(),
                     )
                 ],
                 summary=None,

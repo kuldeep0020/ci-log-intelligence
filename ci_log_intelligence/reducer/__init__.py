@@ -27,8 +27,6 @@ def reduce_parsed_lines(
 
     effective_job_context = job_context or JobContext(job_name=None, run_id=None, repo=None)
     with measure_stage("detect_failures", collector, structured_logger):
-        # Step 1 scaffolding: detected_failures will be plumbed through ``ReductionResult`` in step 3.
-        # Today it is built only to feed ``detected_failures_to_anchors``.
         detected_failures = run_detectors(parsed_line_list, effective_job_context)
         anchors = detected_failures_to_anchors(detected_failures)
     collector.record_metric("number_of_anchors", float(len(anchors)))
@@ -63,7 +61,11 @@ def reduce_parsed_lines(
     collector.record_metric("number_of_blocks", float(len(ranked_blocks)))
     log_stage_event(structured_logger, "rank_blocks", blocks=len(ranked_blocks))
 
-    return ReductionResult(blocks=list(ranked_blocks), summary=None)
+    return ReductionResult(
+        blocks=list(ranked_blocks),
+        summary=None,
+        detected_failures=detected_failures,
+    )
 
 
 __all__ = [

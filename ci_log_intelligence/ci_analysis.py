@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Iterable, Optional
 
 from .ingestion import ingest_log
 from .ingestion.github.fetcher import GitHubLogFetcher, normalize_job_name
 from .ingestion.github.models import (
     AnalysisMetadata,
     CIAnalysisReport,
-    FailedBlockView,
     FailedLogAnalysis,
+    FailureRecord,
     PassedContextView,
     RootCauseSummary,
 )
 from .ingestion.github.resolver import resolve_github_url
-from .models import ScoredBlock
+from .models import ScoreComponents, ScoredBlock
 from .parsing import parse_log
 from .reducer import reduce_parsed_lines
 from .reducer.comparison import (
@@ -23,6 +23,7 @@ from .reducer.comparison import (
     select_root_cause,
     summarize_failed_block,
 )
+from .reducer.detectors import DetectedFailure
 from .storage import InMemoryStorage
 from .summarizer import summarize_reduction_result
 from .utils.logging import get_structured_logger, log_stage_event
@@ -127,27 +128,17 @@ def _build_report(
             has_stack_trace=False,
             has_assertion=False,
             score=0.0,
-            score_components={},
+            score_components=ScoreComponents(
+                severity_weight=0.0,
+                signal_density=0.0,
+                duplicate_penalty=0.0,
+            ),
         )
-        failed_block_views: list[FailedBlockView] = []
+        failures: list[FailureRecord] = []
     else:
         analysis, scored_block = root_cause_candidate
         root_cause = _summarize_root_cause(scored_block, analysis.log.job_name, analysis.log.run_id)
-        failed_block_views = []
-        for current_analysis in sorted(
-            failed_analyses,
-            key=lambda item: (-item.log.run_id, item.log.job_name.lower(), item.log.job_id),
-        ):
-            for block in current_analysis.result.blocks:
-                failed_block_views.append(
-                    FailedBlockView(
-                        start_line=block.block.start_line,
-                        end_line=block.block.end_line,
-                        summary=summarize_failed_block(
-                            block, current_analysis.log.job_name, current_analysis.log.run_id
-                        ),
-                    )
-                )
+        failures = _build_failure_records(failed_analyses)
 
     passed_context_views = [
         PassedContextView(job_name=context.job_name, excerpt=context.excerpt)
@@ -161,11 +152,97 @@ def _build_report(
 
     return CIAnalysisReport(
         root_cause=root_cause,
-        failed_blocks=failed_block_views,
+        failures=failures,
         passed_context=passed_context_views,
         cross_run_insights=list(insights),
         metadata=metadata,
     )
+
+
+def _build_failure_records(
+    failed_analyses: Iterable[FailedLogAnalysis],
+) -> list[FailureRecord]:
+    failures: list[FailureRecord] = []
+    for current_analysis in sorted(
+        failed_analyses,
+        key=lambda item: (-item.log.run_id, item.log.job_name.lower(), item.log.job_id),
+    ):
+        detected = current_analysis.result.detected_failures
+        for block in current_analysis.result.blocks:
+            failure_type, extracted = _resolve_failure_type(block, detected)
+            highest_severity = max(
+                (anchor.severity for anchor in block.block.anchors),
+                default=0,
+            )
+            failures.append(
+                FailureRecord(
+                    type=failure_type,
+                    classification=block.classification,
+                    severity=highest_severity,
+                    score=block.score,
+                    start_line=block.block.start_line,
+                    end_line=block.block.end_line,
+                    summary=summarize_failed_block(
+                        block, current_analysis.log.job_name, current_analysis.log.run_id
+                    ),
+                    log_excerpt=render_block_excerpt(block),
+                    extracted_fields=extracted,
+                )
+            )
+    return failures
+
+
+def _resolve_failure_type(
+    scored_block: ScoredBlock,
+    detected_failures: list[DetectedFailure],
+) -> tuple[str, dict[str, Any]]:
+    """Resolve the FailureRecord ``type`` and ``extracted_fields`` for a scored block.
+
+    Walks the DetectedFailures whose ``anchor_lines`` fall inside the block, picks the
+    most-specific type (``"generic"`` loses to anything else; ties between specialized
+    types break by highest severity then earliest anchor line), and merges
+    ``extracted_fields`` from contributors of the winning type ONLY.
+
+    Primary-type-wins, others discarded: if a block has both a ``hash_mismatch``
+    contributor and a hypothetical ``go_test_fail`` contributor at equal severity,
+    only the higher-severity type's fields flow through. Mixing unrelated schemas
+    under one record's ``extracted_fields`` would force the agent to do union-type
+    inference per key; keeping a single coherent schema per ``type`` value is the
+    contract we want to preserve.
+
+    For the v1 cut with only ``GenericDetector``, returns
+    ``("generic", {"signal_names": [...]})`` with signal names de-duplicated and in
+    first-seen order.
+    """
+    block_line_range = range(
+        scored_block.block.start_line, scored_block.block.end_line + 1
+    )
+    contributors = [
+        failure
+        for failure in detected_failures
+        if any(line in block_line_range for line in failure.anchor_lines)
+    ]
+    if not contributors:
+        return "generic", {}
+
+    specialized = [c for c in contributors if c.type != "generic"]
+    if specialized:
+        primary = min(
+            specialized,
+            key=lambda failure: (-failure.severity, min(failure.anchor_lines, default=0)),
+        )
+        merged: dict[str, Any] = {}
+        for c in specialized:
+            if c.type == primary.type:
+                merged.update(c.extracted_fields)
+        return primary.type, merged
+
+    signal_names: list[str] = []
+    for c in contributors:
+        name = c.extracted_fields.get("signal_name")
+        if name and name not in signal_names:
+            signal_names.append(name)
+    return "generic", {"signal_names": signal_names}
 
 
 def _summarize_root_cause(
@@ -176,27 +253,11 @@ def _summarize_root_cause(
     block_signals = {signal for line in scored_block.block.lines for signal in line.signals}
     has_traceback = "traceback" in block_signals
     has_stack_trace = any(
-        line.content.startswith("  File ") or line.content.startswith("    ")
-        for line in scored_block.block.lines
+        line.content.startswith("  File ") for line in scored_block.block.lines
     )
     has_assertion = "assertion_error" in block_signals or any(
         "AssertionError" in line.content for line in scored_block.block.lines
     )
-    highest_anchor_severity = max(
-        (anchor.severity for anchor in scored_block.block.anchors), default=0
-    )
-    signal_density = (
-        sum(len(line.signals) for line in scored_block.block.lines)
-        / max(len(scored_block.block.lines), 1)
-    )
-    duplicate_penalty = round(
-        (highest_anchor_severity * 5.0) + signal_density - scored_block.score, 6
-    )
-    score_components = {
-        "severity_weight": float(highest_anchor_severity * 5.0),
-        "signal_density": round(signal_density, 6),
-        "duplicate_penalty": duplicate_penalty if duplicate_penalty > 0 else 0.0,
-    }
     return RootCauseSummary(
         summary=summarize_failed_block(scored_block, job_name, run_id),
         log_excerpt=render_block_excerpt(scored_block),
@@ -204,7 +265,7 @@ def _summarize_root_cause(
         has_stack_trace=has_stack_trace,
         has_assertion=has_assertion,
         score=scored_block.score,
-        score_components=score_components,
+        score_components=scored_block.score_components,
     )
 
 
