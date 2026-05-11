@@ -8,7 +8,7 @@ CI Log Intelligence is a deterministic, rule-based system for debugging CI failu
 
 ## What it does
 
-The system accepts raw CI logs or GitHub CI URLs, fetches relevant workflow runs and jobs, reduces failed logs into high-signal failure blocks, extracts comparable context from passed runs, and produces a structured diagnosis that can be consumed by humans or AI agents.
+The system accepts raw CI logs or GitHub CI URLs, fetches relevant workflow runs and jobs, runs a plugin-based detector framework over each failed log to produce typed failure records, extracts comparable context from passed runs, and produces a structured diagnosis that can be consumed by humans or AI agents.
 
 For GitHub-backed analysis it can accept:
 
@@ -18,28 +18,29 @@ For GitHub-backed analysis it can accept:
 
 ## Algorithm
 
-The reducer is intentionally heuristic and deterministic. The pipeline is:
+The reducer is deterministic and heuristic. A set of Detector plugins scans each parsed line and emits typed `DetectedFailure` records; the framework clusters their anchors, expands surrounding context, suppresses noise, scores by severity, classifies, and ranks. Failures with a `classification_claim` from a detector override the signal-based heuristic.
 
-1. Parse lines into `ParsedLine` records with line number, timestamp, step id, and detected signals.
-2. Detect anchors with regex tiers:
-   - severity 3: `Traceback`, `Exception`, `ERROR`
-   - severity 2: `FAILED`, `AssertionError`
-   - severity 1: `WARNING`, `Retrying`
-3. Build clusters from nearby anchors in the same step.
-4. Expand context around each cluster with a default window of plus/minus 20 lines.
-5. Extend further when a stack trace is present.
-6. Suppress blank lines, separators, and duplicate noise.
-7. Merge overlapping or near-adjacent blocks within the same step.
-8. Score each block using anchor severity, signal density, recency, and duplicate penalty.
-9. Classify blocks as `root_cause`, `symptom`, or `flaky`.
-10. Rank the final blocks deterministically.
+Detectors (severity in parentheses):
+
+- `hash_mismatch` (2): `file hashes don't match` paired with `--- FAIL:` in the same step
+- `go_test_fail` (2): standalone `--- FAIL:` markers (not paired with hash-mismatch)
+- `pytest_fail` (2): `FAILED tests/x.py::test_y` with traceback pairing
+- `rust_test_fail` (2): `test foo ... FAILED` with thread-panic pairing
+- `junit_xml` (2): `<testcase>...<failure>` fragments in log streams
+- `build_error_rust` (3): `error[E####]` + `-->` location and bare cargo summaries
+- `build_error_go` (3): `./pkg/file.go:line:col:` messages
+- `build_error_npm` (3): `npm ERR!` / `yarn error` blocks
+- `build_error_make` (3): `make: *** [target] Error N`
+- `build_error_gcc` (3): `file:line:col: error: ...` with note continuation
+- `generic` (1-3): hardened keyword fallback (`Traceback` / `Exception` / `ERROR` / `FAILED` / etc.)
+
+Build errors at severity 3 rank above test failures at severity 2, so when a build broke before any test ran the build error is correctly selected as `root_cause`. Score formula: `severity*5 + signal_density - duplicate_penalty` (no recency bias).
 
 For CI-aware analysis:
 
-1. Failed jobs run through the full reducer.
-2. Passed jobs do not run through full reduction.
-3. Passed jobs only contribute step-matched, nearby, or test-name-matched excerpts.
-4. A cross-run analyzer compares failed blocks with passed excerpts to produce deterministic insights such as environment-specific failures, missing steps, or query/result differences.
+1. Failed jobs run through the full pipeline.
+2. Passed jobs use targeted extraction (step / test name / nearby line match), not full reduction.
+3. A cross-run analyzer compares failed blocks with passed excerpts to surface variant-only failures, missing steps, and query/result differences.
 
 ## Installation
 
@@ -91,47 +92,58 @@ Run the MCP server over HTTP:
 ci-log-intelligence-mcp --transport http --host 127.0.0.1 --port 8001
 ```
 
-The exposed MCP tool is:
+The MCP server exposes three tools so the calling agent can explore-then-drill instead of paying for one fixed payload on every call:
 
-- `analyze_ci_failure`
+1. `list_failed_jobs(ci_url)` -- cheap map of failed jobs with job names, classifications, and failure types present. No per-block content. Use this first to decide which job to investigate.
 
-Tool input:
+2. `analyze_ci_failure(ci_url, top_k=3, failure_types=None, include_passed=True, max_passed_runs=1)` -- main typed-record analysis. `failure_types` filters by detector (e.g. `["hash_mismatch"]`). `top_k` truncates the result; `metadata.failures_total` surfaces how many records were produced before truncation.
 
-```json
-{
-  "ci_url": "https://github.com/owner/repo/pull/123"
-}
-```
+3. `get_block(ci_url, block_index, surround=5)` -- drill into a specific block by position. `ci_url` must be a job-scoped URL.
 
-Tool output:
+Results are cached per `(repo, run_id, job_id)`, so subsequent calls against the same URL skip the GitHub fetch, parse, and reduction entirely.
+
+Tool output (for `analyze_ci_failure`):
 
 ```json
 {
   "root_cause": {
-    "summary": "string",
-    "log_excerpt": "string",
-    "confidence": 0.87
+    "summary": "...",
+    "log_excerpt": "...",
+    "has_traceback": true,
+    "has_stack_trace": true,
+    "has_assertion": false,
+    "score": 15.5,
+    "score_components": {
+      "severity_weight": 15.0,
+      "signal_density": 0.5,
+      "duplicate_penalty": 0.0
+    }
   },
-  "failed_blocks": [
+  "failures": [
     {
-      "start_line": 10,
-      "end_line": 25,
-      "summary": "string"
+      "type": "hash_mismatch",
+      "classification": "root_cause",
+      "severity": 2,
+      "score": 10.0,
+      "start_line": 100,
+      "end_line": 145,
+      "summary": "...",
+      "log_excerpt": "...",
+      "extracted_fields": {
+        "test_name": "TestRunSetPartial",
+        "warehouse_target": "postgres",
+        "job_name": "postgres-test (bundling)"
+      }
     }
   ],
-  "passed_context": [
-    {
-      "job_name": "test-redshift",
-      "excerpt": "string"
-    }
-  ],
-  "cross_run_insights": [
-    "Failure occurs only in variant snowflake for job group test."
-  ],
+  "passed_context": [{"job_name": "...", "excerpt": "..."}],
+  "cross_run_insights": ["..."],
   "metadata": {
     "total_runs_analyzed": 3,
     "failed_runs": 1,
-    "passed_runs": 2
+    "passed_runs": 2,
+    "failures_returned": 1,
+    "failures_total": 1
   }
 }
 ```
@@ -144,9 +156,10 @@ Analyze a raw log:
 from ci_log_intelligence import analyze_log
 
 result = analyze_log("STEP: test\nERROR build failed\nException: boom")
-print(result.summary)
-for block in result.blocks:
-    print(block.block.start_line, block.block.end_line, block.score, block.classification)
+for failure in result.detected_failures:
+    print(failure.type, failure.anchor_lines, failure.extracted_fields)
+for scored in result.blocks:
+    print(scored.block.start_line, scored.block.end_line, scored.score, scored.classification)
 ```
 
 Analyze a GitHub CI URL:
@@ -160,6 +173,8 @@ report = analyze_ci_url(
     max_passed_runs=3,
 )
 print(report.root_cause.summary)
+for record in report.failures:
+    print(record.type, record.classification, record.score, record.extracted_fields)
 ```
 
 ## HTTP API
