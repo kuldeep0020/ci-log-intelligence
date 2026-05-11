@@ -5,8 +5,12 @@ from typing import Sequence
 from ...models import Anchor, ParsedLine
 from .base import DetectedFailure, Detector, JobContext
 from .generic import GenericDetector
+from .hash_mismatch import HashMismatchDetector
 
-_REGISTRY: list[Detector] = [GenericDetector()]
+# Ordered specialized-first: ties in ``_resolve_failure_type`` already break by
+# severity then earliest anchor line, but keeping specialized detectors ahead
+# of ``GenericDetector`` makes the registry's intent explicit.
+_REGISTRY: list[Detector] = [HashMismatchDetector(), GenericDetector()]
 
 
 def get_detectors() -> list[Detector]:
@@ -51,6 +55,7 @@ __all__ = [
     "DetectedFailure",
     "Detector",
     "GenericDetector",
+    "HashMismatchDetector",
     "JobContext",
     "detected_failures_to_anchors",
     "get_detectors",

@@ -14,7 +14,13 @@ _STEP_PATTERNS = [
     re.compile(r"^::group::(?P<step>.+?)\s*$"),
     re.compile(r"^##\[group\](?P<step>.+?)\s*$"),
     re.compile(r"^=+>>?\s+(?P<step>.+?)\s*$"),
-    re.compile(r"^---\s+(?P<step>\S.+?)\s*$"),
+    # ``--- something``-style step markers (Buildkite-style). Exclude the Go test
+    # runner v1 markers ``--- FAIL:`` / ``--- PASS:`` / ``--- SKIP:`` so they remain
+    # inside the surrounding step and can be paired with co-occurring assertion
+    # output by detectors like ``HashMismatchDetector``. If additional Go test
+    # markers ever need to be honored as in-step content (e.g. ``--- BENCH:`` from
+    # ``go test -bench``), extend the exclusion list here.
+    re.compile(r"^---\s+(?!FAIL:|PASS:|SKIP:)(?P<step>\S.+?)\s*$"),
 ]
 
 _TIMESTAMP_PATTERNS = [

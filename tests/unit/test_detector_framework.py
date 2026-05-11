@@ -6,6 +6,7 @@ from ci_log_intelligence.models import ParsedLine
 from ci_log_intelligence.reducer.detectors import (
     DetectedFailure,
     GenericDetector,
+    HashMismatchDetector,
     JobContext,
     detected_failures_to_anchors,
     get_detectors,
@@ -177,13 +178,13 @@ class DetectorFrameworkHardenedPatternTests(unittest.TestCase):
 
 
 class DetectorFrameworkRegistryTests(unittest.TestCase):
-    def test_registry_contains_generic_detector(self) -> None:
+    def test_registry_lists_specialized_detectors_before_generic(self) -> None:
         detectors = get_detectors()
 
-        self.assertEqual(len(detectors), 1)
-        self.assertIsInstance(detectors[0], GenericDetector)
-        self.assertEqual(detectors[0].name, "generic")
-        self.assertEqual(detectors[0].failure_type, "generic")
+        self.assertEqual([d.name for d in detectors], ["hash_mismatch", "generic"])
+        self.assertIsInstance(detectors[0], HashMismatchDetector)
+        self.assertIsInstance(detectors[1], GenericDetector)
+        self.assertEqual(detectors[1].failure_type, "generic")
 
     def test_run_detectors_accepts_explicit_detector_sequence(self) -> None:
         lines = [_make_line(1, "ERROR x")]

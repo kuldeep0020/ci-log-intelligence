@@ -23,7 +23,7 @@ from .reducer.comparison import (
     select_root_cause,
     summarize_failed_block,
 )
-from .reducer.detectors import DetectedFailure
+from .reducer.detectors import DetectedFailure, JobContext
 from .storage import InMemoryStorage
 from .summarizer import summarize_reduction_result
 from .utils.logging import get_structured_logger, log_stage_event
@@ -72,8 +72,17 @@ def analyze_ci_url(
     total_blocks = 0.0
     for failed_log in failed_logs:
         failed_metrics = MetricsCollector()
+        job_context = JobContext(
+            job_name=failed_log.job_name,
+            run_id=failed_log.run_id,
+            repo=target.repo,
+        )
         with measure_stage("reduce_failed_log", collector, logger):
-            reduction_result = _analyze_single_log(failed_log.content, metrics=failed_metrics)
+            reduction_result = _analyze_single_log(
+                failed_log.content,
+                metrics=failed_metrics,
+                job_context=job_context,
+            )
         snapshot = failed_metrics.snapshot()
         total_anchors += float(snapshot["metrics"].get("number_of_anchors", 0.0))
         total_blocks += float(snapshot["metrics"].get("number_of_blocks", 0.0))
@@ -269,7 +278,11 @@ def _summarize_root_cause(
     )
 
 
-def _analyze_single_log(content: str, metrics: Optional[MetricsCollector] = None):
+def _analyze_single_log(
+    content: str,
+    metrics: Optional[MetricsCollector] = None,
+    job_context: Optional[JobContext] = None,
+):
     logger = get_structured_logger("ci_log_intelligence")
     collector = metrics or MetricsCollector()
     backend = InMemoryStorage()
@@ -278,7 +291,12 @@ def _analyze_single_log(content: str, metrics: Optional[MetricsCollector] = None
         with measure_stage("parse", collector, logger):
             parsed_lines = parse_log(stored_log, backend)
 
-        result = reduce_parsed_lines(parsed_lines, metrics=collector, logger=logger)
+        result = reduce_parsed_lines(
+            parsed_lines,
+            metrics=collector,
+            logger=logger,
+            job_context=job_context,
+        )
 
         with measure_stage("summarize", collector, logger):
             result.summary = summarize_reduction_result(result)

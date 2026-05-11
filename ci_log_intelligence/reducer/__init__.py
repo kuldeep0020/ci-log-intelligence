@@ -53,7 +53,7 @@ def reduce_parsed_lines(
     log_stage_event(structured_logger, "score_blocks", blocks=len(scored_blocks))
 
     with measure_stage("classify_blocks", collector, structured_logger):
-        classified_blocks = classify_blocks(scored_blocks)
+        classified_blocks = classify_blocks(scored_blocks, detected_failures=detected_failures)
     log_stage_event(structured_logger, "classify_blocks", blocks=len(classified_blocks))
 
     with measure_stage("rank_blocks", collector, structured_logger):
