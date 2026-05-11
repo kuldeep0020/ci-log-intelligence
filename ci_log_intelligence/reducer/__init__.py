@@ -9,6 +9,7 @@ from ..utils.metrics import MetricsCollector, measure_stage
 from .anchors import detect_anchors
 from .classification import classify_blocks, rank_blocks
 from .clustering import build_clusters
+from .detectors import JobContext, detected_failures_to_anchors, run_detectors
 from .expansion import expand_context
 from .merge import merge_blocks
 from .scoring import score_blocks
@@ -19,13 +20,18 @@ def reduce_parsed_lines(
     parsed_lines: Iterable,
     metrics: Optional[MetricsCollector] = None,
     logger: Optional[logging.Logger] = None,
+    job_context: Optional[JobContext] = None,
 ) -> ReductionResult:
     parsed_line_list = list(parsed_lines)
     collector = metrics or MetricsCollector()
     structured_logger = logger or get_structured_logger("ci_log_intelligence.reducer")
 
+    effective_job_context = job_context or JobContext(job_name=None, run_id=None, repo=None)
     with measure_stage("detect_anchors", collector, structured_logger):
-        anchors = detect_anchors(parsed_line_list)
+        # Step 1 scaffolding: detected_failures will be plumbed through ``ReductionResult`` in step 3.
+        # Today it is built only to feed ``detected_failures_to_anchors``.
+        detected_failures = run_detectors(parsed_line_list, effective_job_context)
+        anchors = detected_failures_to_anchors(detected_failures)
     collector.record_metric("number_of_anchors", float(len(anchors)))
     log_stage_event(structured_logger, "detect_anchors", anchors=len(anchors))
 
