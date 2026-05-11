@@ -37,6 +37,17 @@ class WorkflowJob:
 
 @dataclass(slots=True, frozen=True)
 class NormalizedLog:
+    """Job log content fetched (or placeholder) for a single GitHub job.
+
+    ``content`` may be empty when the record is acting as a cache-hit
+    placeholder -- see ``ci_analysis.fetch_with_cache_awareness``. The
+    downstream analyze loop short-circuits cache hits before reading
+    ``content``, so the empty string is never parsed. Consumers that read
+    ``content`` directly must either guard against empty strings or have
+    verified the record is not a placeholder (e.g. by confirming the
+    matching cache entry is absent).
+    """
+
     run_id: int
     job_id: int
     job_name: str
@@ -140,12 +151,16 @@ class AnalysisMetadata:
     total_runs_analyzed: int
     failed_runs: int
     passed_runs: int
+    failures_returned: int = 0
+    failures_total: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
             "total_runs_analyzed": self.total_runs_analyzed,
             "failed_runs": self.failed_runs,
             "passed_runs": self.passed_runs,
+            "failures_returned": self.failures_returned,
+            "failures_total": self.failures_total,
         }
 
 

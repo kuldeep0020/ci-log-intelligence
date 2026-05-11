@@ -1,121 +1,45 @@
 from __future__ import annotations
 
-import json
-import os
 import re
-import shutil
-import subprocess
-from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
-from typing import Any, Iterable, Literal, Mapping, Optional
-from urllib.parse import urlencode
+from dataclasses import dataclass
+from typing import Iterable, Literal, Optional
 
 import requests
 
 from ...utils.logging import get_structured_logger, log_stage_event
+from .fetcher_helpers import (
+    format_log_fetch_error as _format_log_fetch_error,
+    normalize_log_content,
+    parse_workflow_job as _parse_workflow_job,
+    parse_workflow_run as _parse_workflow_run,
+    plan_log_fetches as _plan_log_fetches,
+    sort_logs_by_job,
+    sort_runs as _sort_runs,
+)
 from .models import FetchedGitHubData, GitHubTarget, NormalizedLog, WorkflowJob, WorkflowRun
-
-_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-
-class GitHubTransport(ABC):
-    @abstractmethod
-    def get_json(
-        self,
-        endpoint: str,
-        params: Optional[Mapping[str, object]] = None,
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_text(
-        self,
-        endpoint: str,
-        params: Optional[Mapping[str, object]] = None,
-    ) -> str:
-        raise NotImplementedError
+from .transports import (
+    GhCLITransport,
+    GitHubTransport,
+    RequestsTransport,
+    create_github_transport,
+)
 
 
-class GhCLITransport(GitHubTransport):
-    def get_json(
-        self,
-        endpoint: str,
-        params: Optional[Mapping[str, object]] = None,
-    ) -> dict[str, Any]:
-        payload = self._run(endpoint, params=params, expect_json=True)
-        return json.loads(payload)
+@dataclass(slots=True, frozen=True)
+class LogFetchPlan:
+    """A resolved fetch plan: runs + planned-job tuples, no log content yet.
 
-    def get_text(
-        self,
-        endpoint: str,
-        params: Optional[Mapping[str, object]] = None,
-    ) -> str:
-        return self._run(endpoint, params=params, expect_json=False)
+    ``planned_jobs`` carries ``(WorkflowRun, WorkflowJob, logical_name, status)``
+    tuples in the order the original ``_fetch_planned_logs`` loop would
+    process. Callers can consult a cache against ``(repo, run_id, job_id)``
+    before invoking ``fetch_planned_log_content`` to skip already-cached jobs.
+    """
 
-    def _run(
-        self,
-        endpoint: str,
-        params: Optional[Mapping[str, object]],
-        expect_json: bool,
-    ) -> str:
-        target = _build_endpoint(endpoint, params)
-        completed = subprocess.run(
-            ["gh", "api", target],
-            check=False,
-            capture_output=True,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.decode("utf-8", errors="replace").strip())
-        return completed.stdout.decode("utf-8", errors="replace")
-
-
-class RequestsTransport(GitHubTransport):
-    def __init__(
-        self,
-        token: Optional[str] = None,
-        session: Optional[requests.Session] = None,
-    ) -> None:
-        resolved_token = token or os.getenv("GITHUB_TOKEN")
-        if not resolved_token:
-            raise RuntimeError("GITHUB_TOKEN is required when gh CLI is unavailable.")
-
-        self._session = session or requests.Session()
-        self._session.headers.update(
-            {
-                "Authorization": f"Bearer {resolved_token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            }
-        )
-
-    def get_json(
-        self,
-        endpoint: str,
-        params: Optional[Mapping[str, object]] = None,
-    ) -> dict[str, Any]:
-        response = self._session.get(
-            f"https://api.github.com/{endpoint}",
-            params=dict(params or {}),
-            timeout=30,
-        )
-        response.raise_for_status()
-        return response.json()
-
-    def get_text(
-        self,
-        endpoint: str,
-        params: Optional[Mapping[str, object]] = None,
-    ) -> str:
-        response = self._session.get(
-            f"https://api.github.com/{endpoint}",
-            params=dict(params or {}),
-            timeout=30,
-            allow_redirects=True,
-        )
-        response.raise_for_status()
-        return response.text
-
+    target: GitHubTarget
+    selected_runs: list[WorkflowRun]
+    planned_jobs: list[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]]
 
 class GitHubLogFetcher:
     def __init__(
@@ -134,6 +58,31 @@ class GitHubLogFetcher:
         max_runs: int = 5,
         max_passed_runs: int = 3,
     ) -> FetchedGitHubData:
+        plan = self.plan_logs(
+            target,
+            include_passed=include_passed,
+            max_runs=max_runs,
+            max_passed_runs=max_passed_runs,
+        )
+        logs = self._fetch_planned_logs(target.repo, plan.planned_jobs)
+        return self.assemble_fetched_data(plan, logs, include_passed=include_passed, max_passed_runs=max_passed_runs)
+
+    def plan_logs(
+        self,
+        target: GitHubTarget,
+        *,
+        include_passed: bool = True,
+        max_runs: int = 5,
+        max_passed_runs: int = 3,
+    ) -> "LogFetchPlan":
+        """Resolve runs and jobs without fetching any log content.
+
+        Returns a ``LogFetchPlan`` that callers (e.g. ``analyze_ci_url``) can
+        consult against a cache before paying for log-content fetches. The
+        plan exposes the ``planned_jobs`` list -- the same tuples the
+        internal log-fetch loop iterates -- plus the ``selected_runs`` list
+        used to build the final report's run metadata.
+        """
         selected_runs = self._resolve_runs(target, max_runs=max_runs)
         log_stage_event(
             self._logger,
@@ -153,7 +102,6 @@ class GitHubLogFetcher:
             if selected_group is None:
                 raise ValueError(f"Job {target.job_id} not found in run {target.run_id}.")
 
-        logs: list[NormalizedLog] = []
         jobs_processed = 0
         all_jobs: list[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]] = []
         for run in selected_runs:
@@ -182,20 +130,59 @@ class GitHubLogFetcher:
             include_passed=include_passed,
             max_passed_runs=max_passed_runs,
         )
-        logs = self._fetch_planned_logs(target.repo, fetch_plan)
 
         log_stage_event(
             self._logger,
-            "fetch_jobs",
+            "plan_jobs",
             jobs_processed=jobs_processed,
-            logs=len(logs),
             planned_failed_jobs=len([item for item in fetch_plan if item[3] == "failed"]),
             planned_passed_jobs=len([item for item in fetch_plan if item[3] == "passed"]),
         )
 
+        return LogFetchPlan(
+            target=target,
+            selected_runs=selected_runs,
+            planned_jobs=fetch_plan,
+        )
+
+    def fetch_planned_log_content(
+        self,
+        repo: str,
+        planned_jobs: list[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]],
+    ) -> list[NormalizedLog]:
+        """Fetch the log content for the supplied planned-job tuples.
+
+        Public so callers that want to consult a cache before paying for the
+        content fetch can iterate the plan themselves and call this with the
+        subset of jobs that are NOT cached.
+        """
+        return self._fetch_planned_logs(repo, planned_jobs)
+
+    def assemble_fetched_data(
+        self,
+        plan: "LogFetchPlan",
+        logs: list[NormalizedLog],
+        *,
+        include_passed: bool,
+        max_passed_runs: int,
+    ) -> FetchedGitHubData:
+        """Build the final ``FetchedGitHubData`` from a plan + log list.
+
+        Public so callers (e.g. ``_fetch_with_cache_awareness``) that mix
+        cached placeholder logs with freshly-fetched logs can reuse the same
+        grouping/cap logic that ``fetch_logs`` applies internally.
+        """
+        log_stage_event(
+            self._logger,
+            "fetch_jobs",
+            logs=len(logs),
+            planned_failed_jobs=len([item for item in plan.planned_jobs if item[3] == "failed"]),
+            planned_passed_jobs=len([item for item in plan.planned_jobs if item[3] == "passed"]),
+        )
+
         if not include_passed:
             failed_only = [log for log in logs if log.status == "failed"]
-            return FetchedGitHubData(runs=selected_runs, logs=_sort_logs(failed_only))
+            return FetchedGitHubData(runs=plan.selected_runs, logs=_sort_logs(failed_only))
 
         grouped_logs = group_logs_by_job(logs)
         selected_logs: list[NormalizedLog] = []
@@ -206,7 +193,7 @@ class GitHubLogFetcher:
             selected_logs.extend(_sort_logs(failed_logs))
             selected_logs.extend(_sort_logs(passed_logs)[:max_passed_runs])
 
-        return FetchedGitHubData(runs=selected_runs, logs=_sort_logs(selected_logs))
+        return FetchedGitHubData(runs=plan.selected_runs, logs=_sort_logs(selected_logs))
 
     def fetch_workflow_runs_for_pr(
         self,
@@ -320,12 +307,6 @@ class GitHubLogFetcher:
         raise ValueError("GitHub target must include a PR number or workflow run id.")
 
 
-def create_github_transport(token: Optional[str] = None) -> GitHubTransport:
-    if shutil.which("gh"):
-        return GhCLITransport()
-    return RequestsTransport(token=token)
-
-
 def classify_job_status(conclusion: Optional[str]) -> Optional[Literal["passed", "failed"]]:
     normalized = (conclusion or "").strip().lower()
     if normalized == "success":
@@ -357,102 +338,5 @@ def group_logs_by_job(logs: Iterable[NormalizedLog]) -> dict[str, list[Normalize
     }
 
 
-def normalize_log_content(content: str) -> str:
-    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-    normalized = _ANSI_ESCAPE_PATTERN.sub("", normalized)
-    return normalized.strip("\n")
-
-
-def _plan_log_fetches(
-    jobs: Iterable[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]],
-    *,
-    include_passed: bool,
-    max_passed_runs: int,
-) -> list[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]]:
-    job_list = sorted(
-        jobs,
-        key=lambda item: (item[2], -item[0].run_id, item[1].job_name.lower(), item[1].job_id),
-    )
-    failed_groups = {logical_name for _, _, logical_name, status in job_list if status == "failed"}
-
-    planned: list[tuple[WorkflowRun, WorkflowJob, str, Literal["passed", "failed"]]] = [
-        item for item in job_list if item[3] == "failed"
-    ]
-    if not include_passed or not failed_groups or max_passed_runs <= 0:
-        return planned
-
-    passed_per_group: dict[str, int] = defaultdict(int)
-    for item in job_list:
-        _, _, logical_name, status = item
-        if status != "passed" or logical_name not in failed_groups:
-            continue
-        if passed_per_group[logical_name] >= max_passed_runs:
-            continue
-        planned.append(item)
-        passed_per_group[logical_name] += 1
-
-    return sorted(
-        planned,
-        key=lambda item: (item[2], -item[0].run_id, item[1].job_name.lower(), item[1].job_id),
-    )
-
-
-def _format_log_fetch_error(
-    repo: str,
-    job_id: int,
-    error: Exception,
-    transport: GitHubTransport,
-) -> str:
-    message = str(error).strip() or error.__class__.__name__
-    if "404" in message:
-        return (
-            f"GitHub returned 404 while fetching logs for job {job_id} in {repo} "
-            f"via {type(transport).__name__}. This usually means the job did not emit logs "
-            f"(for example, it was skipped) or the current GitHub credentials do not have "
-            f"access to this repository or workflow run. Original error: {message}"
-        )
-    return (
-        f"Failed to fetch logs for job {job_id} in {repo} via {type(transport).__name__}: "
-        f"{message}"
-    )
-
-
-def _parse_workflow_run(payload: Mapping[str, Any]) -> WorkflowRun:
-    return WorkflowRun(
-        run_id=int(payload["id"]),
-        workflow_id=int(payload["workflow_id"]) if payload.get("workflow_id") is not None else None,
-        head_branch=payload.get("head_branch"),
-        head_sha=payload.get("head_sha"),
-        html_url=payload.get("html_url", ""),
-        status=payload.get("status"),
-        conclusion=payload.get("conclusion"),
-        display_title=payload.get("display_title") or payload.get("name") or "",
-    )
-
-
-def _parse_workflow_job(run_id: int, payload: Mapping[str, Any]) -> WorkflowJob:
-    return WorkflowJob(
-        run_id=run_id,
-        job_id=int(payload["id"]),
-        job_name=str(payload["name"]),
-        status=payload.get("status"),
-        conclusion=payload.get("conclusion"),
-    )
-
-
-def _build_endpoint(endpoint: str, params: Optional[Mapping[str, object]]) -> str:
-    if not params:
-        return endpoint
-    sorted_params = sorted((key, value) for key, value in params.items() if value is not None)
-    return f"{endpoint}?{urlencode(sorted_params)}"
-
-
-def _sort_runs(runs: Iterable[WorkflowRun]) -> list[WorkflowRun]:
-    return sorted(runs, key=lambda run: run.run_id, reverse=True)
-
-
 def _sort_logs(logs: Iterable[NormalizedLog]) -> list[NormalizedLog]:
-    return sorted(
-        logs,
-        key=lambda log: (normalize_job_name(log.job_name), -log.run_id, log.job_name.lower(), log.job_id),
-    )
+    return sort_logs_by_job(logs, normalize_job_name=normalize_job_name)
