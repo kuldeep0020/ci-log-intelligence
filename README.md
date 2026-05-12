@@ -23,13 +23,13 @@ After a few of these, your conversation either OOMs the context or gets too expe
 
 `ci-log-intelligence` is an MCP server (also usable as a CLI / Python library) that sits between the agent and the CI logs. You give it a GitHub URL — a PR, a workflow run, or a single job — and it does the heavy reading in its own process:
 
-```text
-PR / run / job URL  →  fetch logs  →  parse  →  11 detector plugins  →  typed failure records
-                                                                              │
-                                                                              ▼
-                                                                      a few hundred tokens
-                                                                      of focused context
-                                                                      back to your agent
+```mermaid
+flowchart LR
+    A["PR / run / job URL"] --> B["Fetch logs"]
+    B --> C["Parse"]
+    C --> D["11 detector plugins"]
+    D --> E["Typed failure records"]
+    E --> F["A few hundred tokens<br/>of focused context<br/>back to your agent"]
 ```
 
 You get back a structured response: a ranked list of typed `FailureRecord`s (`hash_mismatch`, `build_error_rust`, `pytest_fail`, `go_test_fail`, …), each with the test name / file path / error code / log excerpt that's actually relevant — not 50K lines of `npm install` output.
@@ -108,60 +108,78 @@ In your AI agent, after wiring up the MCP server:
 
 > "The build at `https://github.com/me/myrepo/actions/runs/12345` failed. Can you fix it?"
 
-The agent now has three tools available. A reasonable trace:
+The agent now has three tools available. A reasonable interaction:
 
-```text
-agent  →  list_failed_jobs("https://github.com/me/myrepo/actions/runs/12345")
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent
+    participant Server as ci-log-intelligence
+    participant GH as GitHub Actions
 
-server →  {
-            "jobs": [
-              {
-                "job_name": "postgres-test (bundling)",
-                "block_count": 3,
-                "failure_types_present": ["hash_mismatch", "generic"],
-                "classifications": {"root_cause": 1, "symptom": 2},
-                "job_url": "…/runs/12345/jobs/678"
-              }
-            ],
-            "metadata": {"failed_jobs": 1, "total_runs_analyzed": 1}
-          }
+    Agent->>Server: list_failed_jobs(runs/12345)
+    Server->>GH: fetch run + jobs metadata
+    GH-->>Server: failed jobs
+    Server-->>Agent: ~500 tokens<br/>jobs + classifications + failure_types
 
-agent  →  analyze_ci_failure(
-             ci_url="…/runs/12345",
-             failure_types=["hash_mismatch"]
-          )
+    Agent->>Server: analyze_ci_failure(failure_types=["hash_mismatch"])
+    Server->>Server: detector pipeline (cached)
+    Server-->>Agent: ~2K tokens<br/>typed FailureRecords + root_cause
 
-server →  {
-            "root_cause": {
-              "summary": "Run 12345 job postgres-test (bundling) root_cause at lines 1058-1062: ...",
-              "log_excerpt": "common.go:1058: file hashes don't match for ...\n--- FAIL: TestRunSetPartial (45.3s)\n…",
-              "has_traceback": false,
-              "has_assertion": true,
-              "score": 10.0,
-              "score_components": {"severity_weight": 10.0, "signal_density": 0.5, "duplicate_penalty": 0.0}
-            },
-            "failures": [
-              {
-                "type": "hash_mismatch",
-                "classification": "root_cause",
-                "severity": 2,
-                "score": 10.0,
-                "start_line": 1058,
-                "end_line": 1062,
-                "summary": "…",
-                "log_excerpt": "…",
-                "extracted_fields": {
-                  "test_name": "TestRunSetPartial",
-                  "warehouse_target": "postgres",
-                  "job_name": "postgres-test (bundling)"
-                }
-              }
-            ],
-            "metadata": {"failures_returned": 1, "failures_total": 1, …}
-          }
+    Note over Agent: Knows: TestRunSetPartial on postgres<br/>Runs: make update_ref_samples scoped to that test
 ```
 
-The agent now knows: it's a golden-file hash mismatch in `TestRunSetPartial` on the postgres warehouse target. It can run `make update_ref_samples` scoped to that one test. Total context consumed: <2K tokens instead of 50K.
+Concrete payloads for that trace — the wire-format shape callers integrate against:
+
+```json
+// list_failed_jobs response
+{
+  "jobs": [
+    {
+      "job_name": "postgres-test (bundling)",
+      "block_count": 3,
+      "failure_types_present": ["hash_mismatch", "generic"],
+      "classifications": {"root_cause": 1, "symptom": 2},
+      "job_url": "…/runs/12345/jobs/678"
+    }
+  ],
+  "metadata": {"failed_jobs": 1, "total_runs_analyzed": 1}
+}
+```
+
+```json
+// analyze_ci_failure response
+{
+  "root_cause": {
+    "summary": "Run 12345 job postgres-test (bundling) root_cause at lines 1058-1062: ...",
+    "log_excerpt": "common.go:1058: file hashes don't match for ...\n--- FAIL: TestRunSetPartial (45.3s)\n…",
+    "has_traceback": false,
+    "has_assertion": true,
+    "score": 10.0,
+    "score_components": {"severity_weight": 10.0, "signal_density": 0.5, "duplicate_penalty": 0.0}
+  },
+  "failures": [
+    {
+      "type": "hash_mismatch",
+      "classification": "root_cause",
+      "severity": 2,
+      "score": 10.0,
+      "start_line": 1058,
+      "end_line": 1062,
+      "summary": "…",
+      "log_excerpt": "…",
+      "extracted_fields": {
+        "test_name": "TestRunSetPartial",
+        "warehouse_target": "postgres",
+        "job_name": "postgres-test (bundling)"
+      }
+    }
+  ],
+  "metadata": {"failures_returned": 1, "failures_total": 1}
+}
+```
+
+Total context consumed: <2K tokens instead of 50K.
 
 ## CLI usage
 
