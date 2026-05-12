@@ -5,7 +5,7 @@
 [![CI](https://github.com/kuldeep0020/ci-log-intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/kuldeep0020/ci-log-intelligence/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![PyPI version](https://img.shields.io/pypi/v/ci-log-intelligence.svg)](https://pypi.org/project/ci-log-intelligence/)
+[![PyPI](https://img.shields.io/pypi/v/ci-log-intelligence?label=PyPI)](https://pypi.org/project/ci-log-intelligence/)
 
 
 ## The problem
