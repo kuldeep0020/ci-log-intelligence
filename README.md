@@ -182,6 +182,17 @@ Machine-readable JSON:
 ci-log-intel analyze --url https://github.com/owner/repo/actions/runs/12345 --json
 ```
 
+### Analyzing a local log file
+
+The same detectors work on any large log file — not just GitHub Actions runs. Point `--file` at a local path (or `-` for stdin):
+
+```bash
+ci-log-intel analyze --file ./build.log
+kubectl logs my-pod | ci-log-intel analyze --file -
+```
+
+You get back the same ranked failure blocks and typed detected-failure records, useful for triaging Jenkins/Buildkite/local-CI logs or any long log stream where the actual failure is buried.
+
 ## Python usage
 
 ```python

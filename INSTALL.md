@@ -219,7 +219,9 @@ And point the client at `http://127.0.0.1:8001`.
 
 ## CLI usage (no MCP client needed)
 
-You can also use the tool directly without any MCP client:
+You can also use the tool directly without any MCP client.
+
+### From a GitHub URL
 
 ```bash
 ci-log-intel analyze \
@@ -234,6 +236,17 @@ ci-log-intel analyze \
   --url https://github.com/owner/repo/actions/runs/12345 \
   --json
 ```
+
+### From a local log file
+
+The detector pipeline also runs on any plain log file — Jenkins, Buildkite, local builds, `kubectl logs` output, anything. Use `--file <path>` or `--file -` for stdin:
+
+```bash
+ci-log-intel analyze --file ./build.log
+kubectl logs my-pod --tail=50000 | ci-log-intel analyze --file -
+```
+
+The output is the same ranked failure blocks and typed detected-failure records you get from a GitHub URL, minus the cross-run comparison (which needs failed+passed runs from the same workflow).
 
 ---
 
