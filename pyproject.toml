@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ci-log-intelligence"
-version = "0.1.1"
+version = "0.2.0"
 description = "MCP server that turns 50K-line CI logs into focused failure context for AI coding agents."
 readme = "README.md"
 requires-python = ">=3.10"
