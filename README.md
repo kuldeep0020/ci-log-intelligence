@@ -79,13 +79,33 @@ export GITHUB_TOKEN=ghp_…
 
 ### Wire up your MCP client
 
-This repo ships shared MCP configuration for several clients (see [INSTALL.md](INSTALL.md) for the full setup guide):
+**Claude Code (CLI)** — one command, available in every project:
 
-- **Codex**: `.codex/config.toml` (auto-discovered)
-- **VS Code / GitHub Copilot**: `.vscode/mcp.json` (workspace-scoped)
-- **Claude Desktop**: example at `docs/claude_desktop_config.example.json`
+```bash
+claude mcp add ci-log-intelligence --scope user -- ci-log-intelligence-mcp
+claude mcp list   # confirm it shows up
+```
 
-For any other MCP client, point it at the `ci-log-intelligence-mcp` command installed by the package.
+**Claude Desktop** — add to your `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`; Windows: `%APPDATA%\Claude\claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "ci-log-intelligence": {
+      "command": "ci-log-intelligence-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Fully quit and relaunch Claude Desktop after editing the file.
+
+**Codex** — this repo includes `.codex/config.toml`; open the repo in Codex and run `/mcp` to confirm `ci-log-intelligence` is listed.
+
+**VS Code / GitHub Copilot** — this repo includes `.vscode/mcp.json`; open the repo in VS Code with Copilot agent mode enabled.
+
+See [INSTALL.md](INSTALL.md) for full setup instructions including troubleshooting, environment variables, HTTP transport, and other MCP clients.
 
 ## A 30-second demo
 
