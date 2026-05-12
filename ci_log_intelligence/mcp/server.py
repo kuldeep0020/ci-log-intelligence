@@ -1,18 +1,59 @@
-from __future__ import annotations
+"""FastMCP server exposing the CI-log-intelligence tools.
+
+We intentionally do NOT use ``from __future__ import annotations`` here
+because FastMCP's ``without_injected_parameters`` wrapper preserves the
+original string annotations and exposes them to pydantic via
+``get_type_hints`` resolved against the wrapper's globals (FastMCP's own
+module), where ``Optional`` is not in scope. Evaluating annotations eagerly
+at definition time sidesteps that gap.
+"""
 
 import argparse
+import asyncio
 from typing import Optional
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 
+from ..progress import ProgressCallback
 from . import tools
 from .cache import get_default_cache
 
 server = FastMCP("ci-log-intelligence")
 
 
+def _make_progress_bridge(ctx: Optional[Context]) -> Optional[ProgressCallback]:
+    """Adapt FastMCP's async ``Context.report_progress`` to a sync ProgressCallback.
+
+    Sync callback invocations happen on the worker thread that's executing the
+    blocking tool body; the bridge schedules the async progress notification on
+    the main event loop via ``run_coroutine_threadsafe`` and discards the
+    returned future so progress is fire-and-forget. A failed notification must
+    not fail the actual tool call -- if the event loop has closed (or the
+    schedule itself raises) we drop the notification silently.
+    """
+    if ctx is None:
+        return None
+    loop = asyncio.get_running_loop()
+
+    def bridge(current: int, total: int, message: str) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                ctx.report_progress(progress=current, total=total, message=message),
+                loop,
+            )
+        except RuntimeError:
+            # Loop closed mid-call; drop the notification silently rather than
+            # raising from the worker thread.
+            pass
+
+    return bridge
+
+
 @server.tool(name="list_failed_jobs")
-def list_failed_jobs_tool(ci_url: str) -> dict[str, object]:
+async def list_failed_jobs_tool(
+    ci_url: str,
+    ctx: Optional[Context] = None,
+) -> dict[str, object]:
     """List failed jobs for a CI URL without per-block content.
 
     A cheap "map" call. Use this first to decide which jobs to drill into
@@ -45,16 +86,23 @@ def list_failed_jobs_tool(ci_url: str) -> dict[str, object]:
     ``get_block`` call on the same URL skips re-fetching from GitHub
     and re-running the reducer.
     """
-    return tools.list_failed_jobs(ci_url, cache=get_default_cache())
+    progress = _make_progress_bridge(ctx)
+    return await asyncio.to_thread(
+        tools.list_failed_jobs,
+        ci_url,
+        cache=get_default_cache(),
+        progress=progress,
+    )
 
 
 @server.tool(name="analyze_ci_failure")
-def analyze_ci_failure_tool(
+async def analyze_ci_failure_tool(
     ci_url: str,
     top_k: int = 3,
     failure_types: Optional[list[str]] = None,
     include_passed: bool = True,
     max_passed_runs: int = 1,
+    ctx: Optional[Context] = None,
 ) -> dict[str, object]:
     """Analyze a CI failure URL and return a focused, typed failure report.
 
@@ -101,21 +149,25 @@ def analyze_ci_failure_tool(
     The reducer is deterministic and results are cached per
     ``(repo, run_id, job_id)``, so repeat calls on the same URL are cheap.
     """
-    return tools.analyze_ci_failure(
+    progress = _make_progress_bridge(ctx)
+    return await asyncio.to_thread(
+        tools.analyze_ci_failure,
         ci_url,
         top_k=top_k,
         failure_types=failure_types,
         include_passed=include_passed,
         max_passed_runs=max_passed_runs,
         cache=get_default_cache(),
+        progress=progress,
     )
 
 
 @server.tool(name="get_block")
-def get_block_tool(
+async def get_block_tool(
     ci_url: str,
     block_index: int,
     surround: int = 5,
+    ctx: Optional[Context] = None,
 ) -> dict[str, object]:
     """Drill into a specific block of a specific failed job.
 
@@ -155,7 +207,15 @@ def get_block_tool(
                                 "fetch_failed" | "invalid_argument",
          "block_count": int (only for "index_out_of_range")}
     """
-    return tools.get_block(ci_url, block_index, surround, cache=get_default_cache())
+    progress = _make_progress_bridge(ctx)
+    return await asyncio.to_thread(
+        tools.get_block,
+        ci_url,
+        block_index,
+        surround=surround,
+        cache=get_default_cache(),
+        progress=progress,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

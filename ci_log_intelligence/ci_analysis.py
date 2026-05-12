@@ -19,6 +19,7 @@ from .ingestion.github.models import (
 from .ingestion.github.resolver import resolve_github_url
 from .mcp.cache import CachedJob, CacheKey
 from .parsing import parse_log
+from .progress import ProgressCallback, report as report_progress
 from .reducer import reduce_parsed_lines
 from .reducer.comparison import analyze_cross_run, extract_passed_context
 from .reducer.detectors import JobContext
@@ -42,6 +43,7 @@ def analyze_ci_url(
     cache: Optional["JobCache"] = None,
     top_k: Optional[int] = None,
     failure_types: Optional[Sequence[str]] = None,
+    progress: Optional[ProgressCallback] = None,
 ) -> CIAnalysisReport:
     """Run the end-to-end CI analysis pipeline for a GitHub URL.
 
@@ -69,6 +71,7 @@ def analyze_ci_url(
             max_runs=fetch_run_limit,
             max_passed_runs=max_passed_runs,
             cache=cache,
+            progress=progress,
         )
 
     failed_logs = [log for log in fetched.logs if log.status == "failed"]
@@ -157,6 +160,7 @@ def fetch_with_cache_awareness(
     max_runs: int,
     max_passed_runs: int,
     cache: Optional["JobCache"],
+    progress: Optional[ProgressCallback] = None,
 ):
     """Plan the fetch, then fetch only the log content the cache doesn't already cover.
 
@@ -167,46 +171,36 @@ def fetch_with_cache_awareness(
     the job (and the cache-hit branch picks it up). Passed jobs are always
     fetched because their reduction is consumed by ``extract_passed_context``
     without going through the cache.
-    """
-    if cache is None:
-        return fetcher.fetch_logs(
-            target,
-            include_passed=include_passed,
-            max_runs=max_runs,
-            max_passed_runs=max_passed_runs,
-        )
 
+    When ``progress`` is supplied, the callback is invoked once with a
+    ``Planning log fetches`` message, once per planned job (either
+    ``Fetching ...`` or ``Cached: ...`` depending on cache state), and a
+    final ``All logs fetched`` event. The ``total`` field on per-job and
+    final events is the count of planned jobs so the client sees a stable
+    denominator.
+    """
+    report_progress(progress, 0, 0, "Planning log fetches")
     plan = fetcher.plan_logs(
         target,
         include_passed=include_passed,
         max_runs=max_runs,
         max_passed_runs=max_passed_runs,
     )
+    total_jobs = len(plan.planned_jobs)
+    if total_jobs == 0:
+        report_progress(progress, 0, 0, "No failed jobs found")
+        return fetcher.assemble_fetched_data(
+            plan, [], include_passed=include_passed, max_passed_runs=max_passed_runs
+        )
 
-    cached_logs: list = []
-    jobs_to_fetch: list = []
-    for run, job, _, status in plan.planned_jobs:
-        if status == "failed":
-            key = CacheKey(repo=target.repo, run_id=run.run_id, job_id=job.job_id)
-            if cache.get(key) is not None:
-                # Emit a placeholder log so the analyze loop iterates this job
-                # and takes the cache-hit branch. The empty ``content`` is
-                # never read because the cache lookup short-circuits it.
-                # See ``NormalizedLog`` docstring for the placeholder contract.
-                cached_logs.append(
-                    NormalizedLog(
-                        run_id=run.run_id,
-                        job_id=job.job_id,
-                        job_name=job.job_name,
-                        status="failed",
-                        content="",
-                    )
-                )
-                continue
-        jobs_to_fetch.append((run, job, _, status))
-
-    fetched_logs = fetcher.fetch_planned_log_content(target.repo, jobs_to_fetch) if jobs_to_fetch else []
+    cached_logs, jobs_to_fetch = _split_planned_jobs(
+        plan.planned_jobs, target.repo, cache, total_jobs, progress
+    )
+    fetched_logs = (
+        fetcher.fetch_planned_log_content(target.repo, jobs_to_fetch) if jobs_to_fetch else []
+    )
     all_logs = _sort_logs(cached_logs + fetched_logs)
+    report_progress(progress, total_jobs, total_jobs, "All logs fetched")
 
     # ``assemble_fetched_data`` handles both include_passed=True (group + cap)
     # and include_passed=False (failed-only filter), so a single call covers
@@ -216,6 +210,71 @@ def fetch_with_cache_awareness(
         all_logs,
         include_passed=include_passed,
         max_passed_runs=max_passed_runs,
+    )
+
+
+def _split_planned_jobs(
+    planned_jobs,
+    repo: str,
+    cache: Optional["JobCache"],
+    total_jobs: int,
+    progress: Optional[ProgressCallback],
+):
+    """Partition planned jobs into cache-hit placeholders vs jobs needing fetch.
+
+    Emits per-job progress in plan order so the client sees a stable
+    ``i+1/total`` counter regardless of which jobs end up cache-hits.
+    Cache hits get a ``Cached:`` message; misses get a ``Fetching log for``
+    message. Returns ``(cached_logs, jobs_to_fetch)``.
+    """
+    cached_logs: list = []
+    jobs_to_fetch: list = []
+    for index, planned in enumerate(planned_jobs):
+        run, job, _, status = planned
+        if _is_cache_hit(cache, repo, run.run_id, job.job_id, status):
+            cached_logs.append(_cache_hit_placeholder(run, job))
+            report_progress(
+                progress,
+                index + 1,
+                total_jobs,
+                f"Cached: {job.job_name} ({index + 1}/{total_jobs})",
+            )
+        else:
+            report_progress(
+                progress,
+                index + 1,
+                total_jobs,
+                f"Fetching log for {job.job_name} ({index + 1}/{total_jobs})",
+            )
+            jobs_to_fetch.append(planned)
+    return cached_logs, jobs_to_fetch
+
+
+def _is_cache_hit(
+    cache: Optional["JobCache"],
+    repo: str,
+    run_id: int,
+    job_id: int,
+    status: str,
+) -> bool:
+    if cache is None or status != "failed":
+        return False
+    return cache.get(CacheKey(repo=repo, run_id=run_id, job_id=job_id)) is not None
+
+
+def _cache_hit_placeholder(run, job) -> NormalizedLog:
+    """Build the empty-``content`` placeholder for a cache-hit job.
+
+    The analyze loop iterates this job and takes the cache-hit branch; the
+    empty ``content`` is never read because the cache lookup short-circuits
+    it. See ``NormalizedLog`` docstring for the placeholder contract.
+    """
+    return NormalizedLog(
+        run_id=run.run_id,
+        job_id=job.job_id,
+        job_name=job.job_name,
+        status="failed",
+        content="",
     )
 
 

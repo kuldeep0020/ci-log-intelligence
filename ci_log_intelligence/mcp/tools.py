@@ -1,31 +1,19 @@
 from __future__ import annotations
 
-from collections import Counter
 from typing import Optional
 
 import requests
 
 from ..ci_analysis import analyze_ci_url, fetch_with_cache_awareness
-from ..ci_report_builder import resolve_failure_type
-from ..ingestion import ingest_log
-from ..ingestion.github.fetcher import (
-    GitHubLogFetcher,
-    classify_job_status,
-)
-from ..ingestion.github.models import (
-    GitHubTarget,
-    NormalizedLog,
-    WorkflowJob,
-)
+from ..ingestion.github.fetcher import GitHubLogFetcher
 from ..ingestion.github.resolver import resolve_github_url
-from ..models import ParsedLine, ScoredBlock
-from ..parsing import parse_log
-from ..reducer import reduce_parsed_lines
-from ..reducer.comparison import summarize_failed_block
-from ..reducer.detectors import JobContext
-from ..storage import InMemoryStorage
-from ..summarizer import summarize_reduction_result
-from .cache import CachedJob, CacheKey, JobCache, get_default_cache
+from ..progress import ProgressCallback, report as report_progress
+from ._tools_internals import (
+    build_get_block_response,
+    fetch_and_cache_single_job,
+    summarize_failed_logs,
+)
+from .cache import CacheKey, JobCache, get_default_cache
 
 
 _DEFAULT_TOP_K = 3
@@ -42,6 +30,7 @@ def list_failed_jobs(
     *,
     cache: Optional[JobCache] = None,
     fetcher: Optional[GitHubLogFetcher] = None,
+    progress: Optional[ProgressCallback] = None,
 ) -> dict[str, object]:
     """Return a cheap map of failed jobs for a CI URL.
 
@@ -50,7 +39,12 @@ def list_failed_jobs(
     this first to decide which jobs to inspect with ``analyze_ci_failure``
     or ``get_block``. Each failed job's parse + reduce result is cached so
     follow-up tool calls on the same URL are essentially free.
+
+    ``progress`` (optional) receives a coarse 0-100 boundary marker
+    (``Resolving CI URL`` / ``Done``); finer per-job progress comes from
+    ``fetch_with_cache_awareness`` inside this call.
     """
+    report_progress(progress, 0, 100, "Resolving CI URL")
     job_cache = cache if cache is not None else get_default_cache()
     active_fetcher = fetcher or GitHubLogFetcher()
 
@@ -67,45 +61,21 @@ def list_failed_jobs(
         max_runs=_DEFAULT_MAX_RUNS,
         max_passed_runs=0,
         cache=job_cache,
+        progress=progress,
     )
     failed_logs = [log for log in fetched.logs if log.status == "failed"]
-
-    summaries: list[dict[str, object]] = []
-    for failed_log in failed_logs:
-        cache_key = CacheKey(
-            repo=target.repo, run_id=failed_log.run_id, job_id=failed_log.job_id
-        )
-        cached = job_cache.get(cache_key)
-        if cached is None:
-            # Cache miss: parse + reduce the freshly-fetched content and store.
-            # ``fetch_with_cache_awareness`` only emits placeholder logs for
-            # cache HITS, so a cache miss here means ``content`` is real.
-            job_context = JobContext(
-                job_name=failed_log.job_name,
-                run_id=failed_log.run_id,
-                repo=target.repo,
-            )
-            parsed_lines, reduction_result = _parse_and_reduce(
-                failed_log.content, job_context
-            )
-            cached = CachedJob(
-                job_name=failed_log.job_name,
-                parsed_lines=parsed_lines,
-                reduction_result=reduction_result,
-            )
-            job_cache.put(cache_key, cached)
-
-        summaries.append(_job_summary_from_cache(cache_key, cached))
-
+    summaries = summarize_failed_logs(failed_logs, target.repo, job_cache)
     summaries.sort(key=lambda item: (-int(item["run_id"]), str(item["job_name"]).lower()))
 
-    return {
+    response = {
         "jobs": summaries,
         "metadata": {
             "total_runs_analyzed": len({run.run_id for run in fetched.runs}),
             "failed_jobs": len(summaries),
         },
     }
+    report_progress(progress, 100, 100, "Done")
+    return response
 
 
 def analyze_ci_failure(
@@ -117,6 +87,7 @@ def analyze_ci_failure(
     max_passed_runs: int = _DEFAULT_MAX_PASSED_RUNS,
     cache: Optional[JobCache] = None,
     fetcher: Optional[GitHubLogFetcher] = None,
+    progress: Optional[ProgressCallback] = None,
 ) -> dict[str, object]:
     """Run the full typed-record analysis for a CI URL.
 
@@ -125,7 +96,12 @@ def analyze_ci_failure(
     ``metadata.failures_total`` reports the unfiltered count so the agent
     can detect truncation; ``metadata.failures_returned`` is the length of
     the ``failures`` array actually returned.
+
+    ``progress`` (optional) receives a coarse 0-100 boundary marker
+    (``Resolving CI URL`` / ``Done``); finer per-job progress comes from
+    ``analyze_ci_url`` inside this call.
     """
+    report_progress(progress, 0, 100, "Resolving CI URL")
     job_cache = cache if cache is not None else get_default_cache()
     # ``analyze_ci_url``'s ``max_runs`` defaults to ``_DEFAULT_MAX_RUNS`` so this
     # call path scans the same window as ``list_failed_jobs``. Keep the two
@@ -139,8 +115,11 @@ def analyze_ci_failure(
         cache=job_cache,
         top_k=top_k,
         failure_types=failure_types,
+        progress=progress,
     )
-    return report.to_dict()
+    response = report.to_dict()
+    report_progress(progress, 100, 100, "Done")
+    return response
 
 
 def get_block(
@@ -150,6 +129,7 @@ def get_block(
     *,
     cache: Optional[JobCache] = None,
     fetcher: Optional[GitHubLogFetcher] = None,
+    progress: Optional[ProgressCallback] = None,
 ) -> dict[str, object]:
     """Return the full content of a specific block in a specific job.
 
@@ -158,7 +138,12 @@ def get_block(
     ``failures`` list (matching ``analyze_ci_failure``'s ordering).
     ``surround`` is the number of raw log lines included before the block's
     start and after its end as outer context.
+
+    ``progress`` (optional) fires three success-path milestones:
+    ``Resolving job URL``, ``Fetching/loading job ...``, ``Done``. Error
+    returns do NOT emit further progress.
     """
+    report_progress(progress, 0, 3, "Resolving job URL")
     try:
         target = resolve_github_url(ci_url)
     except ValueError as exc:
@@ -179,11 +164,12 @@ def get_block(
     job_cache = cache if cache is not None else get_default_cache()
     cache_key = CacheKey(repo=target.repo, run_id=target.run_id, job_id=target.job_id)
 
+    report_progress(progress, 1, 3, f"Fetching/loading job {target.job_id}")
     cached = job_cache.get(cache_key)
     if cached is None:
         active_fetcher = fetcher or GitHubLogFetcher()
         try:
-            cached = _fetch_and_cache_single_job(active_fetcher, target, job_cache)
+            cached = fetch_and_cache_single_job(active_fetcher, target, job_cache)
         except (ValueError, RuntimeError, requests.HTTPError) as exc:
             # ``requests.HTTPError`` is wrapped to ``RuntimeError`` by
             # ``fetch_job_log`` today; included here as defense in depth so a
@@ -201,164 +187,11 @@ def get_block(
             "block_count": len(blocks),
         }
 
-    scored_block = blocks[block_index]
-    detected = cached.reduction_result.detected_failures
-    failure_type, extracted = resolve_failure_type(scored_block, detected)
-    highest_severity = max(
-        (anchor.severity for anchor in scored_block.block.anchors),
-        default=0,
+    response = build_get_block_response(
+        target, cached, blocks[block_index], block_index, surround
     )
-
-    return {
-        "job_url": _build_job_url(target),
-        "job_name": cached.job_name,
-        "run_id": target.run_id,
-        "job_id": target.job_id,
-        "block_index": block_index,
-        "type": failure_type,
-        "classification": scored_block.classification,
-        "severity": highest_severity,
-        "score": scored_block.score,
-        "summary": summarize_failed_block(scored_block, cached.job_name, target.run_id),
-        "extracted_fields": extracted,
-        "start_line": scored_block.block.start_line,
-        "end_line": scored_block.block.end_line,
-        "lines": _slice_lines_with_context(
-            cached.parsed_lines, scored_block, surround
-        ),
-    }
-
-
-def _slice_lines_with_context(
-    parsed_lines: list[ParsedLine],
-    scored_block: ScoredBlock,
-    surround: int,
-) -> list[dict[str, object]]:
-    """Return the block's lines plus ``surround`` context lines either side.
-
-    ``parsed_lines`` are 1-indexed by ``ParsedLine.line_number``; we index by
-    that field rather than by list position so we are resilient to any future
-    parser changes that drop lines.
-    """
-    block = scored_block.block
-    anchor_line_numbers = {anchor.line_number for anchor in block.anchors}
-    start = max(1, block.start_line - surround)
-    end = block.end_line + surround
-
-    line_by_number = {line.line_number: line for line in parsed_lines}
-    result: list[dict[str, object]] = []
-    for line_number in range(start, end + 1):
-        parsed = line_by_number.get(line_number)
-        if parsed is None:
-            continue
-        result.append(
-            {
-                "line_number": line_number,
-                "content": parsed.content,
-                "in_block": block.start_line <= line_number <= block.end_line,
-                "is_anchor": line_number in anchor_line_numbers,
-            }
-        )
-    return result
-
-
-def _job_summary_from_cache(key: CacheKey, cached: CachedJob) -> dict[str, object]:
-    result = cached.reduction_result
-    failure_types: list[str] = []
-    seen_types: set[str] = set()
-    classification_counter: Counter[str] = Counter()
-    for block in result.blocks:
-        failure_type, _ = resolve_failure_type(block, result.detected_failures)
-        if failure_type not in seen_types:
-            failure_types.append(failure_type)
-            seen_types.add(failure_type)
-        classification_counter[block.classification] += 1
-
-    return {
-        "run_id": key.run_id,
-        "job_id": key.job_id,
-        "job_name": cached.job_name,
-        "conclusion": "failure",
-        "job_url": _build_job_url(
-            GitHubTarget(repo=key.repo, run_id=key.run_id, job_id=key.job_id)
-        ),
-        "block_count": len(result.blocks),
-        "failure_types_present": failure_types,
-        "classifications": dict(classification_counter),
-    }
-
-
-def _fetch_and_cache_single_job(
-    active_fetcher: GitHubLogFetcher,
-    target: GitHubTarget,
-    job_cache: JobCache,
-) -> CachedJob:
-    if target.run_id is None or target.job_id is None:
-        raise ValueError("Job-scoped URL required.")
-
-    jobs = active_fetcher.fetch_jobs_for_run(target.repo, target.run_id)
-    selected_job: Optional[WorkflowJob] = None
-    for job in jobs:
-        if job.job_id == target.job_id:
-            selected_job = job
-            break
-    if selected_job is None:
-        raise ValueError(
-            f"Job {target.job_id} not found in run {target.run_id} for {target.repo}."
-        )
-
-    status = classify_job_status(selected_job.conclusion)
-    if status is None:
-        raise ValueError(
-            f"Job {target.job_id} has conclusion '{selected_job.conclusion}'; no logs available."
-        )
-
-    content = active_fetcher.fetch_job_log(target.repo, target.job_id)
-    normalized = NormalizedLog(
-        run_id=target.run_id,
-        job_id=target.job_id,
-        job_name=selected_job.job_name,
-        status=status,
-        content=content,
-    )
-    job_context = JobContext(
-        job_name=normalized.job_name,
-        run_id=normalized.run_id,
-        repo=target.repo,
-    )
-
-    parsed_lines, reduction_result = _parse_and_reduce(normalized.content, job_context)
-    cached = CachedJob(
-        job_name=normalized.job_name,
-        parsed_lines=parsed_lines,
-        reduction_result=reduction_result,
-    )
-    job_cache.put(
-        CacheKey(repo=target.repo, run_id=target.run_id, job_id=target.job_id),
-        cached,
-    )
-    return cached
-
-
-def _parse_and_reduce(content: str, job_context: JobContext):
-    backend = InMemoryStorage()
-    stored = ingest_log(content, backend)
-    try:
-        parsed_lines = parse_log(stored, backend)
-        result = reduce_parsed_lines(parsed_lines, job_context=job_context)
-        result.summary = summarize_reduction_result(result)
-        return list(parsed_lines), result
-    finally:
-        backend.delete(stored.reference)
-
-
-def _build_job_url(target: GitHubTarget) -> str:
-    if target.run_id is None or target.job_id is None:
-        return ""
-    return (
-        f"https://github.com/{target.repo}/actions/runs/{target.run_id}"
-        f"/job/{target.job_id}"
-    )
+    report_progress(progress, 3, 3, "Done")
+    return response
 
 
 __all__ = [
