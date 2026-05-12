@@ -279,7 +279,9 @@ See [architecture.md](architecture.md#known-limitations) for the full list.
 
 ## Contributing
 
-Issues and PRs welcome. The codebase is small (~2.5K LOC + tests) and the detector framework is designed to make adding a new language / tool a single-file change. Run the tests, follow the existing patterns in `ci_log_intelligence/reducer/detectors/`, and open a PR.
+If this tool saves you tokens on a debugging session, **contributing back is warmly welcomed** — even a single PR adding a detector for a CI tool that isn't covered yet makes the project meaningfully better for the next person. The codebase is small (~3K LOC + tests) and the detector framework is explicitly designed to make adding a new language / build tool a single-file change.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, a worked "add a new detector" example, and the PR process. The TL;DR: open an issue if you're stuck, send a PR if you're not.
 
 ## License
 
