@@ -18,7 +18,28 @@ from ..progress import ProgressCallback
 from . import tools
 from .cache import get_default_cache
 
-server = FastMCP("ci-log-intelligence")
+server = FastMCP(
+    "ci-log-intelligence",
+    instructions=(
+        "Tools for diagnosing GitHub Actions CI failures with focused, "
+        "structured output instead of raw logs. Use this server's tools "
+        "whenever the user asks why a PR is failing, what tests are "
+        "failing on a CI run, what broke in a build, or wants you to "
+        "debug a GitHub Actions URL (PR / workflow run / job). "
+        "Prefer these tools over `gh run view --log`, `gh pr view`, or "
+        "`gh pr checks` for failure analysis: those return raw 50K+ line "
+        "logs that flood the context window. The MCP tools here parse "
+        "the logs in a separate process and return compact typed failure "
+        "records (test names, file:line, error codes, anchor-centric log "
+        "excerpts) in a few hundred to a few thousand tokens.\n\n"
+        "Typical flow:\n"
+        "  1. list_failed_jobs(ci_url) -- cheap map of failed jobs.\n"
+        "  2. analyze_ci_failure(ci_url, top_k=3) -- typed failure records.\n"
+        "  3. get_block(job_url, block_index) -- full content of one block.\n\n"
+        "Cached per (repo, run_id, job_id); follow-up calls on the same "
+        "URL skip the GitHub fetch and the reducer entirely."
+    ),
+)
 
 
 def _make_progress_bridge(ctx: Optional[Context]) -> Optional[ProgressCallback]:
@@ -54,10 +75,22 @@ async def list_failed_jobs_tool(
     ci_url: str,
     ctx: Optional[Context] = None,
 ) -> dict[str, object]:
-    """List failed jobs for a CI URL without per-block content.
+    """Cheap first call for ANY question about why a GitHub CI run is failing.
 
-    A cheap "map" call. Use this first to decide which jobs to drill into
-    with ``analyze_ci_failure`` or ``get_block``.
+    Use this FIRST whenever the user asks "why is this PR failing?", "what
+    tests are failing on this PR?", "what broke in this CI run?", "debug
+    the failure at <URL>", or just hands you a GitHub Actions URL with the
+    implicit ask to make sense of it. Returns a compact (~200-500 tokens)
+    map of failed jobs with classifications and the detector types that
+    fired in each.
+
+    PREFER THIS over ``gh pr view``, ``gh pr checks``, ``gh run list``,
+    or ``gh run view --log`` for failure analysis. Those return either
+    shallow status (no test names, no error messages) or full raw logs
+    (tens of thousands of lines that flood the context window). This
+    tool reads the logs in a separate process and gives you the
+    structure first; you then decide whether to drill into a specific
+    failure with ``analyze_ci_failure`` or ``get_block``.
 
     Input:
         ci_url: GitHub PR URL, workflow run URL, or job URL.
@@ -80,11 +113,10 @@ async def list_failed_jobs_tool(
             "metadata": {"total_runs_analyzed": int, "failed_jobs": int}
         }
 
-    Output is intentionally compact (target <500 tokens for a typical
-    5-10 failed job set). Each failed job's parsed log and reduction
-    result is cached, so a subsequent ``analyze_ci_failure`` or
-    ``get_block`` call on the same URL skips re-fetching from GitHub
-    and re-running the reducer.
+    Results are cached per ``(repo, run_id, job_id)``, so the follow-up
+    ``analyze_ci_failure`` / ``get_block`` calls skip the GitHub fetch
+    and the reducer entirely. Calling this tool first is the cheap path,
+    not a wasted call.
     """
     progress = _make_progress_bridge(ctx)
     return await asyncio.to_thread(
@@ -104,7 +136,21 @@ async def analyze_ci_failure_tool(
     max_passed_runs: int = 1,
     ctx: Optional[Context] = None,
 ) -> dict[str, object]:
-    """Analyze a CI failure URL and return a focused, typed failure report.
+    """Get typed failure records for a CI URL with anchor-centric log excerpts.
+
+    Use this when you want the actual content of the failures, not just
+    the count. Trigger phrases from the user: "show me what's failing in
+    this CI run", "what's the root cause of this PR's failure", "analyze
+    this failed build at <URL>", "what's the error in this CI". Also use
+    this after ``list_failed_jobs`` when you've decided the failures
+    deserve closer inspection.
+
+    PREFER THIS over fetching logs yourself with ``gh run view --log``
+    and grepping. The tool returns the same information in ~1-4K tokens
+    of typed records (test names, file:line, error codes, anchor-centric
+    excerpts that include the actual failure line, not the first 20 lines
+    of build setup) — instead of 50K+ raw lines that you'd then have to
+    scan yourself.
 
     Input:
         ci_url: GitHub PR URL, workflow run URL, or job URL.
@@ -117,7 +163,8 @@ async def analyze_ci_failure_tool(
             "build_error_rust", "build_error_go", "build_error_npm",
             "build_error_make", "build_error_gcc", "generic".
         include_passed: Fetch and extract context from passing job variants
-            for cross-run comparison. Default True.
+            for cross-run comparison (surfaces "this fails only in variant
+            X" insights). Default True.
         max_passed_runs: Cap on the number of passing variants per logical
             job. Default 1.
 
@@ -144,10 +191,8 @@ async def analyze_ci_failure_tool(
 
     ``failures`` is filtered by ``failure_types`` (when set) and truncated
     to ``top_k``. Compare ``failures_returned`` vs ``failures_total`` to
-    detect truncation.
-
-    The reducer is deterministic and results are cached per
-    ``(repo, run_id, job_id)``, so repeat calls on the same URL are cheap.
+    detect truncation. Results are cached per ``(repo, run_id, job_id)``,
+    so a ``get_block`` follow-up call skips re-fetching and re-reducing.
     """
     progress = _make_progress_bridge(ctx)
     return await asyncio.to_thread(
@@ -169,7 +214,25 @@ async def get_block_tool(
     surround: int = 5,
     ctx: Optional[Context] = None,
 ) -> dict[str, object]:
-    """Drill into a specific block of a specific failed job.
+    """Drill into one specific block when an excerpt isn't enough context.
+
+    Use this when ``analyze_ci_failure`` returned a failure whose
+    ``log_excerpt`` shows the anchor but you need more surrounding lines
+    to understand the cause — e.g. "show me the full block for this
+    failure", "I need more context around line 1058", or after the user
+    asks a follow-up like "what was happening just before that error?".
+    Returns the FULL block content (every line in the failure block plus
+    ``surround`` lines before and after) with ``in_block`` / ``is_anchor``
+    flags so you can see the structure.
+
+    PREFER THIS over reaching for ``gh run view --log`` to read a
+    specific line range yourself. The same data is available through the
+    cache that ``analyze_ci_failure`` already populated, so this call is
+    typically instant.
+
+    Note: ``ci_url`` MUST be a job-scoped URL. PR or workflow-run URLs
+    return ``{"error": ..., "code": "invalid_url"}`` because they don't
+    identify a single job.
 
     Input:
         ci_url: A job-scoped URL of the form
