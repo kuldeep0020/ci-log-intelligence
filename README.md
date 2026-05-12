@@ -1,168 +1,161 @@
-## CI Log Intelligence
+# ci-log-intelligence
 
-CI Log Intelligence is a deterministic, rule-based system for debugging CI failures from raw job logs and GitHub Actions URLs. It has three primary surfaces:
+**Stop dumping 50,000-line CI logs into your AI coding agent.** This MCP server reads the logs *for* the agent and returns a few hundred tokens of focused, typed failure context — so the agent can debug your CI without flooding its context window.
 
-- Python API for local analysis
-- CLI for humans debugging CI
-- MCP server for agents such as Codex, VS Code / GitHub Copilot, and Claude-compatible MCP clients
+[![PyPI version](https://img.shields.io/pypi/v/ci-log-intelligence.svg)](https://pypi.org/project/ci-log-intelligence/)
+[![Python](https://img.shields.io/pypi/pyversions/ci-log-intelligence.svg)](https://pypi.org/project/ci-log-intelligence/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## What it does
+## The problem
 
-The system accepts raw CI logs or GitHub CI URLs, fetches relevant workflow runs and jobs, runs a plugin-based detector framework over each failed log to produce typed failure records, extracts comparable context from passed runs, and produces a structured diagnosis that can be consumed by humans or AI agents.
+You ask Claude / Codex / Copilot to fix a failing CI build. The agent runs `gh run view --log`, gets back 60,000 lines of pytest output, and pastes the whole thing into its context. Now:
 
-For GitHub-backed analysis it can accept:
+- The actual failure is buried somewhere on line 47,892.
+- Your context window is ~80% spent on log output before any work begins.
+- Every tool call after this costs more because the cached context is enormous.
+- The agent's reasoning quality drops because the relevant signal is diluted.
 
-- pull request URLs
-- workflow run URLs
-- job URLs
+After a few of these, your conversation either OOMs the context or gets too expensive to be useful.
 
-## Algorithm
+## What this does
 
-The reducer is deterministic and heuristic. A set of Detector plugins scans each parsed line and emits typed `DetectedFailure` records; the framework clusters their anchors, expands surrounding context, suppresses noise, scores by severity, classifies, and ranks. Failures with a `classification_claim` from a detector override the signal-based heuristic.
+`ci-log-intelligence` is an MCP server (also usable as a CLI / Python library) that sits between the agent and the CI logs. You give it a GitHub URL — a PR, a workflow run, or a single job — and it does the heavy reading in its own process:
 
-Detectors (severity in parentheses):
-
-- `hash_mismatch` (2): `file hashes don't match` paired with `--- FAIL:` in the same step
-- `go_test_fail` (2): standalone `--- FAIL:` markers (not paired with hash-mismatch)
-- `pytest_fail` (2): `FAILED tests/x.py::test_y` with traceback pairing
-- `rust_test_fail` (2): `test foo ... FAILED` with thread-panic pairing
-- `junit_xml` (2): `<testcase>...<failure>` fragments in log streams
-- `build_error_rust` (3): `error[E####]` + `-->` location and bare cargo summaries
-- `build_error_go` (3): `./pkg/file.go:line:col:` messages
-- `build_error_npm` (3): `npm ERR!` / `yarn error` blocks
-- `build_error_make` (3): `make: *** [target] Error N`
-- `build_error_gcc` (3): `file:line:col: error: ...` with note continuation
-- `generic` (1-3): hardened keyword fallback (`Traceback` / `Exception` / `ERROR` / `FAILED` / etc.)
-
-Build errors at severity 3 rank above test failures at severity 2, so when a build broke before any test ran the build error is correctly selected as `root_cause`. Score formula: `severity*5 + signal_density - duplicate_penalty` (no recency bias).
-
-For CI-aware analysis:
-
-1. Failed jobs run through the full pipeline.
-2. Passed jobs use targeted extraction (step / test name / nearby line match), not full reduction.
-3. A cross-run analyzer compares failed blocks with passed excerpts to surface variant-only failures, missing steps, and query/result differences.
-
-## Installation
-
-See [INSTALL.md](/Users/kumar/workspace/ci-log-intelligence/INSTALL.md) for the full setup guide across Codex, VS Code / GitHub Copilot, and Claude Desktop.
-
-Quick start:
-
-```bash
-python -m pip install -e .
-gh auth login
+```text
+PR / run / job URL  →  fetch logs  →  parse  →  11 detector plugins  →  typed failure records
+                                                                              │
+                                                                              ▼
+                                                                      a few hundred tokens
+                                                                      of focused context
+                                                                      back to your agent
 ```
 
-This repo ships shared MCP configuration for:
+You get back a structured response: a ranked list of typed `FailureRecord`s (`hash_mismatch`, `build_error_rust`, `pytest_fail`, `go_test_fail`, …), each with the test name / file path / error code / log excerpt that's actually relevant — not 50K lines of `npm install` output.
 
-- Codex: `.codex/config.toml`
-- VS Code / GitHub Copilot: `.vscode/mcp.json`
-- Claude Desktop manual example: `docs/claude_desktop_config.example.json`
+## Three MCP tools, designed to explore-then-drill
+
+Rather than one omnibus call that returns a fixed payload, the server exposes three tools that map onto how an agent actually wants to work:
+
+| Tool | When to use | Approximate response size |
+|---|---|---|
+| `list_failed_jobs(ci_url)` | First call. Cheap map of failed jobs with classifications + the failure types present in each. No per-block content. | ~200–500 tokens |
+| `analyze_ci_failure(ci_url, top_k=3, failure_types=None, …)` | Get the top-K typed failure records with content. Filterable by detector (`failure_types=["hash_mismatch"]`). | ~1–4K tokens |
+| `get_block(ci_url, block_index, surround=5)` | Drill into a specific block. Returns full content with `in_block` / `is_anchor` flags. | per-block |
+
+Results are cached per `(repo, run_id, job_id)`. A second call against the same URL skips the GitHub fetch, the parse, and the reducer entirely.
+
+## Quick start
+
+### Install
+
+```bash
+pip install ci-log-intelligence
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/YOUR-GITHUB-USERNAME/ci-log-intelligence.git
+cd ci-log-intelligence
+pip install -e .
+```
+
+### Authenticate with GitHub
+
+The fetcher prefers the local `gh` CLI; falls back to a `GITHUB_TOKEN` env var.
+
+```bash
+gh auth login         # preferred
+# or
+export GITHUB_TOKEN=ghp_…
+```
+
+### Wire up your MCP client
+
+This repo ships shared MCP configuration for several clients (see [INSTALL.md](INSTALL.md) for the full setup guide):
+
+- **Codex**: `.codex/config.toml` (auto-discovered)
+- **VS Code / GitHub Copilot**: `.vscode/mcp.json` (workspace-scoped)
+- **Claude Desktop**: example at `docs/claude_desktop_config.example.json`
+
+For any other MCP client, point it at the `ci-log-intelligence-mcp` command installed by the package.
+
+## A 30-second demo
+
+In your AI agent, after wiring up the MCP server:
+
+> "The build at `https://github.com/me/myrepo/actions/runs/12345` failed. Can you fix it?"
+
+The agent now has three tools available. A reasonable trace:
+
+```text
+agent  →  list_failed_jobs("https://github.com/me/myrepo/actions/runs/12345")
+
+server →  {
+            "jobs": [
+              {
+                "job_name": "postgres-test (bundling)",
+                "block_count": 3,
+                "failure_types_present": ["hash_mismatch", "generic"],
+                "classifications": {"root_cause": 1, "symptom": 2},
+                "job_url": "…/runs/12345/jobs/678"
+              }
+            ],
+            "metadata": {"failed_jobs": 1, "total_runs_analyzed": 1}
+          }
+
+agent  →  analyze_ci_failure(
+             ci_url="…/runs/12345",
+             failure_types=["hash_mismatch"]
+          )
+
+server →  {
+            "root_cause": {
+              "summary": "Run 12345 job postgres-test (bundling) root_cause at lines 1058-1062: ...",
+              "log_excerpt": "common.go:1058: file hashes don't match for ...\n--- FAIL: TestRunSetPartial (45.3s)\n…",
+              "has_traceback": false,
+              "has_assertion": true,
+              "score": 10.0,
+              "score_components": {"severity_weight": 10.0, "signal_density": 0.5, "duplicate_penalty": 0.0}
+            },
+            "failures": [
+              {
+                "type": "hash_mismatch",
+                "classification": "root_cause",
+                "severity": 2,
+                "score": 10.0,
+                "start_line": 1058,
+                "end_line": 1062,
+                "summary": "…",
+                "log_excerpt": "…",
+                "extracted_fields": {
+                  "test_name": "TestRunSetPartial",
+                  "warehouse_target": "postgres",
+                  "job_name": "postgres-test (bundling)"
+                }
+              }
+            ],
+            "metadata": {"failures_returned": 1, "failures_total": 1, …}
+          }
+```
+
+The agent now knows: it's a golden-file hash mismatch in `TestRunSetPartial` on the postgres warehouse target. It can run `make update_ref_samples` scoped to that one test. Total context consumed: <2K tokens instead of 50K.
 
 ## CLI usage
 
-Analyze CI from GitHub:
+For humans debugging CI in a terminal:
 
 ```bash
-ci-log-intel analyze \
-  --url https://github.com/owner/repo/pull/123 \
-  --include-passed
+ci-log-intel analyze --url https://github.com/owner/repo/pull/123 --include-passed
 ```
 
-Structured JSON output:
+Machine-readable JSON:
 
 ```bash
-ci-log-intel analyze \
-  --url https://github.com/owner/repo/actions/runs/123456789 \
-  --include-passed \
-  --json
-```
-
-## MCP usage
-
-Run the MCP server over stdio:
-
-```bash
-ci-log-intelligence-mcp
-```
-
-Run the MCP server over HTTP:
-
-```bash
-ci-log-intelligence-mcp --transport http --host 127.0.0.1 --port 8001
-```
-
-The MCP server exposes three tools so the calling agent can explore-then-drill instead of paying for one fixed payload on every call:
-
-1. `list_failed_jobs(ci_url)` -- cheap map of failed jobs with job names, classifications, and failure types present. No per-block content. Use this first to decide which job to investigate.
-
-2. `analyze_ci_failure(ci_url, top_k=3, failure_types=None, include_passed=True, max_passed_runs=1)` -- main typed-record analysis. `failure_types` filters by detector (e.g. `["hash_mismatch"]`). `top_k` truncates the result; `metadata.failures_total` surfaces how many records were produced before truncation.
-
-3. `get_block(ci_url, block_index, surround=5)` -- drill into a specific block by position. `ci_url` must be a job-scoped URL.
-
-Results are cached per `(repo, run_id, job_id)`, so subsequent calls against the same URL skip the GitHub fetch, parse, and reduction entirely.
-
-Tool output (for `analyze_ci_failure`):
-
-```json
-{
-  "root_cause": {
-    "summary": "...",
-    "log_excerpt": "...",
-    "has_traceback": true,
-    "has_stack_trace": true,
-    "has_assertion": false,
-    "score": 15.5,
-    "score_components": {
-      "severity_weight": 15.0,
-      "signal_density": 0.5,
-      "duplicate_penalty": 0.0
-    }
-  },
-  "failures": [
-    {
-      "type": "hash_mismatch",
-      "classification": "root_cause",
-      "severity": 2,
-      "score": 10.0,
-      "start_line": 100,
-      "end_line": 145,
-      "summary": "...",
-      "log_excerpt": "...",
-      "extracted_fields": {
-        "test_name": "TestRunSetPartial",
-        "warehouse_target": "postgres",
-        "job_name": "postgres-test (bundling)"
-      }
-    }
-  ],
-  "passed_context": [{"job_name": "...", "excerpt": "..."}],
-  "cross_run_insights": ["..."],
-  "metadata": {
-    "total_runs_analyzed": 3,
-    "failed_runs": 1,
-    "passed_runs": 2,
-    "failures_returned": 1,
-    "failures_total": 1
-  }
-}
+ci-log-intel analyze --url https://github.com/owner/repo/actions/runs/12345 --json
 ```
 
 ## Python usage
-
-Analyze a raw log:
-
-```python
-from ci_log_intelligence import analyze_log
-
-result = analyze_log("STEP: test\nERROR build failed\nException: boom")
-for failure in result.detected_failures:
-    print(failure.type, failure.anchor_lines, failure.extracted_fields)
-for scored in result.blocks:
-    print(scored.block.start_line, scored.block.end_line, scored.score, scored.classification)
-```
-
-Analyze a GitHub CI URL:
 
 ```python
 from ci_log_intelligence import analyze_ci_url
@@ -172,20 +165,67 @@ report = analyze_ci_url(
     include_passed=True,
     max_passed_runs=3,
 )
+
 print(report.root_cause.summary)
 for record in report.failures:
     print(record.type, record.classification, record.score, record.extracted_fields)
 ```
 
+For raw log strings (no GitHub fetch):
+
+```python
+from ci_log_intelligence import analyze_log
+
+result = analyze_log("STEP: test\nERROR build failed\nException: boom")
+for failure in result.detected_failures:
+    print(failure.type, failure.anchor_lines, failure.extracted_fields)
+```
+
+## How it works
+
+The pipeline is deterministic and heuristic — no LLM in the loop. A set of `Detector` plugins scans each parsed line and emits typed `DetectedFailure` records; the framework clusters anchors, expands context (step-bounded), suppresses noise, scores, classifies, and ranks.
+
+### Detectors shipped in v1
+
+| Detector | Severity | What it catches |
+|---|---|---|
+| `hash_mismatch` | 2 | `file hashes don't match` paired with `--- FAIL:` in the same step (golden-file failures) |
+| `go_test_fail` | 2 | Standalone `--- FAIL: TestName` from `go test` (not paired with hash mismatches) |
+| `pytest_fail` | 2 | `FAILED tests/x.py::test_y - …` summary lines with traceback pairing |
+| `rust_test_fail` | 2 | `test foo::bar ... FAILED` paired with `thread '…' panicked at` |
+| `junit_xml` | 2 | `<testcase>...<failure>` / `<error>` fragments embedded in log streams |
+| `build_error_rust` | 3 | `error[E####]:` + `-->` location, plus bare cargo summaries |
+| `build_error_go` | 3 | `./pkg/file.go:line:col: message` |
+| `build_error_npm` | 3 | Multi-line `npm ERR!` / `yarn error` blocks |
+| `build_error_make` | 3 | `make: *** [target] Error N` |
+| `build_error_gcc` | 3 | `file:line:col: error: …` with note continuation (gcc/clang) |
+| `generic` | 1–3 | Hardened keyword fallback (`Traceback`, `Exception`, `ERROR`, `FAILED`, etc.) with word boundaries, case-insensitive matching, and a benign-mention filter (`"0 errors"` won't anchor) |
+
+Build errors at severity 3 outrank test failures at severity 2, so when a build broke *before* any test ran the build error is correctly selected as `root_cause` and the cascading test failures show as `symptom`s.
+
+### Adding a detector
+
+Each detector is a single file under `ci_log_intelligence/reducer/detectors/`. Implement the `Detector` Protocol (one `scan()` method that returns a list of `DetectedFailure` records) and add yourself to the registry. The framework handles clustering, expansion, scoring, classification, and the typed-record output.
+
+See [architecture.md](architecture.md) for the full pipeline description, data contracts, and design rationale.
+
+## CI-aware comparison
+
+When you give it a PR URL, the server fetches **both** failed and passed jobs in the same workflow run. Failed jobs go through the full reducer; passed jobs use targeted extraction (matching step IDs, test names, or assertion text from failed blocks). A cross-run analyzer then surfaces insights like:
+
+- "Failure occurs only in variant `snowflake` for job group `test`."
+- "Step `build-stage` is present in passed runs but missing in failing run for job group `test`."
+- "Test `foo` behaves differently between passed and failed runs."
+
+These come back in `cross_run_insights` so the agent can quickly see whether a failure is environment-specific, a regression, or flaky.
+
 ## HTTP API
 
-Run the local HTTP API:
+If you'd rather not use MCP, there's a small FastAPI endpoint for raw-log analysis:
 
 ```bash
 uvicorn ci_log_intelligence.api:app --reload
 ```
-
-Send a raw log for analysis:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/analyze \
@@ -193,20 +233,27 @@ curl -X POST http://127.0.0.1:8000/analyze \
   -d '{"log":"STEP: test\nERROR build failed\nException: boom"}'
 ```
 
-## GitHub authentication
-
-GitHub ingestion prefers the local `gh` CLI and falls back to `requests` with `GITHUB_TOKEN`.
-
-Supported sources:
-
-- PR URL
-- workflow run URL
-- job URL
-
 ## Testing
-
-Run the full test suite:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+250+ tests covering each detector, the cache, the MCP tool surface, and end-to-end scenarios across multiple detector types.
+
+## Known limitations
+
+- All specialized detectors are severity 2 or 3 and tiebreak on earliest anchor line. A `specificity` weighting on `DetectedFailure` is on the v1.1 roadmap.
+- Windows-style paths (`C:\src\foo.cpp:5:1:`) may not parse correctly in the GCC build-error detector. Linux CI only for now.
+- The JUnit XML detector caps at 50 records per scan; consumers should check `extracted_fields.get("truncated", False)`.
+- Long-running Go tests with `(1m30s)` duration format report the seconds tail only.
+
+See [architecture.md](architecture.md#known-limitations) for the full list.
+
+## Contributing
+
+Issues and PRs welcome. The codebase is small (~2.5K LOC + tests) and the detector framework is designed to make adding a new language / tool a single-file change. Run the tests, follow the existing patterns in `ci_log_intelligence/reducer/detectors/`, and open a PR.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

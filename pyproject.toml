@@ -5,9 +5,39 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ci-log-intelligence"
 version = "0.1.0"
-description = "CI-aware log intelligence with reducer, CLI, and MCP server."
+description = "MCP server that turns 50K-line CI logs into focused failure context for AI coding agents."
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+  {name = "Kuldeep Kumar"},
+]
+keywords = [
+  "ci",
+  "logs",
+  "mcp",
+  "model-context-protocol",
+  "ai-agents",
+  "github-actions",
+  "debugging",
+  "claude",
+  "codex",
+  "copilot",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: Software Development :: Debuggers",
+  "Topic :: Software Development :: Testing",
+]
 dependencies = [
   "fastapi>=0.136.0",
   "fastmcp>=2.14.7",
@@ -15,6 +45,11 @@ dependencies = [
   "requests>=2.33.0",
   "uvicorn>=0.44.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/YOUR-GITHUB-USERNAME/ci-log-intelligence"
+Repository = "https://github.com/YOUR-GITHUB-USERNAME/ci-log-intelligence"
+Issues = "https://github.com/YOUR-GITHUB-USERNAME/ci-log-intelligence/issues"
 
 [project.scripts]
 ci-log-intel = "ci_log_intelligence.cli.main:main"
