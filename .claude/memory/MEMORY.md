@@ -1,0 +1,5 @@
+- [Project purpose](project_purpose.md) — MCP server that isolates CI failures in a subagent so the caller doesn't ingest 50K+ line logs
+- [User: Kuldeep](user_kuldeep.md) — sole maintainer, ships PyPI releases from this repo, prefers concise engineer-focused communication
+- [Release workflow](release_workflow.md) — bump version, two commits, gh release create, OIDC publishes to PyPI in ~1m15s
+- [Progress token client gap](progress_token_client_gap.md) — Claude Code's MCP client doesn't send progressToken; server is correct, don't refix
+- [Release ops preferences](release_ops_preferences.md) — user pushes himself (no remote-URL workarounds); don't commit one-off diagnostic scripts

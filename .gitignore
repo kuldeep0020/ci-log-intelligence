@@ -15,3 +15,6 @@ dist/
 *.tar.gz
 .coverage
 htmlcov/
+
+# Per-user Claude Code state (committed memory lives under .claude/memory/)
+.claude/settings.local.json
