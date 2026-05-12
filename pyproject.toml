@@ -47,9 +47,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/YOUR-GITHUB-USERNAME/ci-log-intelligence"
-Repository = "https://github.com/YOUR-GITHUB-USERNAME/ci-log-intelligence"
-Issues = "https://github.com/YOUR-GITHUB-USERNAME/ci-log-intelligence/issues"
+Homepage = "https://github.com/kuldeep0020/ci-log-intelligence"
+Repository = "https://github.com/kuldeep0020/ci-log-intelligence"
+Issues = "https://github.com/kuldeep0020/ci-log-intelligence/issues"
 
 [project.scripts]
 ci-log-intel = "ci_log_intelligence.cli.main:main"

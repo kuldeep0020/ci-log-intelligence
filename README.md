@@ -2,9 +2,16 @@
 
 **Stop dumping 50,000-line CI logs into your AI coding agent.** This MCP server reads the logs *for* the agent and returns a few hundred tokens of focused, typed failure context — so the agent can debug your CI without flooding its context window.
 
-[![PyPI version](https://img.shields.io/pypi/v/ci-log-intelligence.svg)](https://pypi.org/project/ci-log-intelligence/)
-[![Python](https://img.shields.io/pypi/pyversions/ci-log-intelligence.svg)](https://pypi.org/project/ci-log-intelligence/)
+[![CI](https://github.com/kuldeep0020/ci-log-intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/kuldeep0020/ci-log-intelligence/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+<!--
+After the first PyPI release, add this badge above for a live version indicator:
+
+[![PyPI version](https://img.shields.io/pypi/v/ci-log-intelligence.svg)](https://pypi.org/project/ci-log-intelligence/)
+-->
+
 
 ## The problem
 
@@ -55,7 +62,7 @@ pip install ci-log-intelligence
 Or from source:
 
 ```bash
-git clone https://github.com/YOUR-GITHUB-USERNAME/ci-log-intelligence.git
+git clone https://github.com/kuldeep0020/ci-log-intelligence.git
 cd ci-log-intelligence
 pip install -e .
 ```
