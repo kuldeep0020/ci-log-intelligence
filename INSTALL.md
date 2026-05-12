@@ -234,3 +234,50 @@ ci-log-intel analyze \
   --url https://github.com/owner/repo/actions/runs/12345 \
   --json
 ```
+
+---
+
+## Progress notifications
+
+The MCP server emits standard MCP progress notifications during long fetches (`Resolving CI URL` → `Fetching log for <job> (i/N)` → `Done`). Whether you see them depends on your client:
+
+| Client | Status |
+|---|---|
+| `ci-log-intel` CLI | Progress prints directly to stderr — always visible |
+| Codex CLI | Sends `progressToken` in tool requests — progress renders |
+| Claude Code (CLI) | Does NOT send `progressToken` as of this writing — progress is silently dropped by the MCP SDK |
+| Claude Desktop | Same as Claude Code — no `progressToken` sent |
+
+This is an MCP-spec behavior: the server may only emit progress notifications when the client opts in by sending `_meta.progressToken` with the tool call. The tools still work correctly in every client — only the live progress bar is missing.
+
+**Workaround:** use the CLI when you want a visible progress bar:
+
+```bash
+ci-log-intel analyze --url https://github.com/owner/repo/pull/123
+```
+
+### Diagnosing progress in your client
+
+If you're integrating a new MCP client and want to know whether it's sending `progressToken`, set the diagnostic env var when registering the server:
+
+```bash
+claude mcp add ci-log-intelligence \
+  --scope user \
+  -e CI_LOG_INTEL_PROGRESS_DEBUG=1 \
+  -- ci-log-intelligence-mcp
+```
+
+(or the equivalent in your client's config). The server will then print to stderr on every tool call:
+
+```text
+[ci-log-intel] progress: ctx present, progressToken=1            <- client opted in
+[ci-log-intel] progress: emit current=0 total=100 msg='...'      <- server emitted
+```
+
+vs.
+
+```text
+[ci-log-intel] progress: ctx present, progressToken=None         <- client did NOT opt in
+```
+
+Run `claude --mcp-debug` (or your client's equivalent) to surface stderr from the MCP subprocess.

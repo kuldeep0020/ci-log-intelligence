@@ -274,6 +274,7 @@ python -m unittest discover -s tests -v
 - Windows-style paths (`C:\src\foo.cpp:5:1:`) may not parse correctly in the GCC build-error detector. Linux CI only for now.
 - The JUnit XML detector caps at 50 records per scan; consumers should check `extracted_fields.get("truncated", False)`.
 - Long-running Go tests with `(1m30s)` duration format report the seconds tail only.
+- **Progress notifications only render in MCP clients that send a `progressToken`.** The server emits MCP-spec-compliant progress events during slow log fetches; clients like Codex CLI display them, but Claude Code (as of this writing) does not opt into them so the progress bar never appears. The tools still work — only the live progress UI is missing. Use the CLI (`ci-log-intel analyze --url ...`) when you want visible progress in a terminal. See [INSTALL.md](INSTALL.md#progress-notifications) for details and a diagnostic flag.
 
 See [architecture.md](architecture.md#known-limitations) for the full list.
 

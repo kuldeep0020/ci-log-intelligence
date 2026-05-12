@@ -10,6 +10,8 @@ at definition time sidesteps that gap.
 
 import argparse
 import asyncio
+import os
+import sys
 from typing import Optional
 
 from fastmcp import Context, FastMCP
@@ -17,6 +19,10 @@ from fastmcp import Context, FastMCP
 from ..progress import ProgressCallback
 from . import tools
 from .cache import get_default_cache
+
+# Set CI_LOG_INTEL_PROGRESS_DEBUG=1 to log progressToken state to stderr.
+# Used to diagnose clients that don't render progress notifications.
+_PROGRESS_DEBUG = os.environ.get("CI_LOG_INTEL_PROGRESS_DEBUG") == "1"
 
 server = FastMCP(
     "ci-log-intelligence",
@@ -53,10 +59,27 @@ def _make_progress_bridge(ctx: Optional[Context]) -> Optional[ProgressCallback]:
     schedule itself raises) we drop the notification silently.
     """
     if ctx is None:
+        if _PROGRESS_DEBUG:
+            print("[ci-log-intel] progress: ctx is None", file=sys.stderr, flush=True)
         return None
     loop = asyncio.get_running_loop()
 
+    if _PROGRESS_DEBUG:
+        meta = getattr(ctx.request_context, "meta", None) if ctx.request_context else None
+        token = getattr(meta, "progressToken", None) if meta else None
+        print(
+            f"[ci-log-intel] progress: ctx present, progressToken={token!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+
     def bridge(current: int, total: int, message: str) -> None:
+        if _PROGRESS_DEBUG:
+            print(
+                f"[ci-log-intel] progress: emit current={current} total={total} msg={message!r}",
+                file=sys.stderr,
+                flush=True,
+            )
         try:
             asyncio.run_coroutine_threadsafe(
                 ctx.report_progress(progress=current, total=total, message=message),
